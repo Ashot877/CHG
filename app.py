@@ -1003,10 +1003,15 @@ def render_login():
             st.warning("No users found. Create `.streamlit/secrets.toml` first. Humanity has once again hidden the keys under the doormat.")
 
         if login_clicked:
-            user_config = APP_USERS.get(entered_password)
+            entered_password_clean = (entered_password or "").strip()
+            user_config = APP_USERS.get(entered_password_clean)
+
             if not user_config:
+                st.session_state.logged_in = False
+                st.session_state.current_user = None
+                st.session_state.jira_me = None
                 st.error("Wrong password.")
-                return
+                st.stop()
 
             token = (user_config.get("jira_token") or "").strip()
             auth_type = user_config.get("jira_auth_type", AUTH_TYPE)
@@ -1018,9 +1023,12 @@ def render_login():
                         me = jira_get_myself(JIRA_BASE_URL, API_VERSION, auth_type, username, token)
                     st.session_state.jira_me = me
                 except Exception as e:
+                    st.session_state.logged_in = False
+                    st.session_state.current_user = None
+                    st.session_state.jira_me = None
                     st.error("Password is correct, but Jira API connection failed.")
                     st.code(str(e))
-                    return
+                    st.stop()
 
             st.session_state.logged_in = True
             st.session_state.current_user = user_config
@@ -1260,31 +1268,15 @@ def page_domain_grouper():
 def page_am_handover():
     render_hero(
         "AM Handover",
-        "Search Change Management tickets by Partner / Project and transfer Reporter, Internal Reporter, Assignee, or Waiting information from to another user.",
-        ["4 JQL groups", "Review before update", "Jira API"],
+        "Search Change Management tickets by Partner / Project, review the results, and transfer only the selected user fields.",
+        ["Review before update", "Jira API", "Safe multi-user fields"],
     )
 
     jira_base_url, api_version, auth_type, username, token, user_payload_type = current_jira_context()
 
-    action_cols = st.columns([1, 1.3, 1.6, 4.1])
-    with action_cols[0]:
-        if st.button("Clear results", use_container_width=True):
-            clear_handover_results()
-            st.rerun()
-    with action_cols[1]:
-        if st.button("Check Jira", use_container_width=True):
-            if require_jira_settings():
-                try:
-                    me = jira_get_myself(jira_base_url, api_version, auth_type, username, token)
-                    st.session_state.jira_me = me
-                    st.success(f"Connected as {me.get('displayName') or me.get('name') or username}")
-                except Exception as e:
-                    st.error("Jira connection failed")
-                    st.code(str(e))
-
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Search setup")
-    st.caption("Write one or several Partner / Project values. The app generates exact 4 JQL groups. Because manually rewriting JQL is how people discover despair.")
+    st.caption("Write one or several Partner / Project values, choose the current user and the new user, then search tickets.")
 
     form_col1, form_col2, form_col3, form_col4 = st.columns([2.2, 1.5, 1.5, 1.1])
     with form_col1:
@@ -1315,28 +1307,6 @@ def page_am_handover():
         search_handover = st.button("Search tickets", type="primary", use_container_width=True)
 
     projects = parse_projects(project_input)
-    live_jqls = build_handover_jqls(projects, current_person) if current_person.strip() else {}
-
-    metric_cols = st.columns(4)
-    with metric_cols[0]:
-        st.markdown(f'<div class="metric-card"><div class="metric-number">{len(projects)}</div><div class="metric-label">Selected projects</div></div>', unsafe_allow_html=True)
-    with metric_cols[1]:
-        st.markdown('<div class="metric-card"><div class="metric-number">4</div><div class="metric-label">Generated JQL groups</div></div>', unsafe_allow_html=True)
-    with metric_cols[2]:
-        st.markdown(f'<div class="metric-card"><div class="metric-number">{current_person or "-"}</div><div class="metric-label">From user</div></div>', unsafe_allow_html=True)
-    with metric_cols[3]:
-        st.markdown(f'<div class="metric-card"><div class="metric-number">{new_person or "-"}</div><div class="metric-label">To user</div></div>', unsafe_allow_html=True)
-
-    with st.expander("Generated handover JQLs", expanded=True):
-        if not projects:
-            st.warning("Add at least one Partner / Project value.")
-        elif not current_person.strip():
-            st.warning("Add From user.")
-        else:
-            for group_name, jql in live_jqls.items():
-                st.markdown(f"**{group_name}**")
-                st.code(jql, language="sql")
-
     st.markdown('</div>', unsafe_allow_html=True)
 
     if search_handover:
@@ -1528,18 +1498,18 @@ def page_am_handover():
                 field_group = change["Field"]
                 try:
                     jira_apply_handover_change(
-                    jira_base_url,
-                    api_version,
-                    auth_type,
-                    username,
-                    token,
-                    issue_key,
-                    field_group,
-                    change.get("From"),
-                    new_person,
-                    user_payload_type,
-                    internal_reporter_field_id,
-                     waiting_info_field_id,
+                        jira_base_url,
+                        api_version,
+                        auth_type,
+                        username,
+                        token,
+                        issue_key,
+                        field_group,
+                        change.get("From"),
+                        new_person,
+                        user_payload_type,
+                        internal_reporter_field_id,
+                        waiting_info_field_id,
                     )
                     results.append({"Ticket": issue_key, "Field": field_group, "Status": "Success"})
                 except Exception as e:
@@ -1556,7 +1526,10 @@ def page_am_handover():
 # =========================================================
 # APP ENTRY
 # =========================================================
-if not st.session_state.logged_in:
+if not st.session_state.get("logged_in") or not st.session_state.get("current_user"):
+    st.session_state.logged_in = False
+    st.session_state.current_user = None
+    st.session_state.jira_me = None
     render_login()
 
 page = sidebar_nav()
