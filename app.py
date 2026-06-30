@@ -736,7 +736,7 @@ def jira_apply_handover_change(
         return
 
     if field_group == "Internal Reporter":
-        current_users = jira_get_issue_field_value(
+        current_value = jira_get_issue_field_value(
             base_url,
             api_version,
             auth_type,
@@ -746,12 +746,20 @@ def jira_apply_handover_change(
             internal_reporter_field_id,
         )
 
-        updated_users = build_replaced_user_list(
-            current_users,
-            old_user,
-            new_user,
-            user_payload_type,
-        )
+        # Internal Reporter is usually a single-user custom field in Jira.
+        # Single-user fields require an object like {"name": "user"}, not a list.
+        # If another Jira instance configures it as multi-user, keep the safer list replacement.
+        if isinstance(current_value, list):
+            updated_value = build_replaced_user_list(
+                current_value,
+                old_user,
+                new_user,
+                user_payload_type,
+            )
+        else:
+            # JQL already found this issue by Internal Reporter = old_user.
+            # For single-user fields, Jira wants only the new user object.
+            updated_value = user_payload
 
         jira_update_issue_fields(
             base_url,
@@ -760,7 +768,7 @@ def jira_apply_handover_change(
             username,
             token,
             issue_key,
-            {internal_reporter_field_id: updated_users},
+            {internal_reporter_field_id: updated_value},
         )
         return
 
@@ -1634,9 +1642,16 @@ def page_am_handover():
         loaded_project_count = len(st.session_state.get("loaded_projects", []))
         st.markdown(f'<div class="metric-card"><div class="metric-number">{loaded_project_count}</div><div class="metric-label">Loaded projects</div></div>', unsafe_allow_html=True)
 
-    selected_changes = []
+    sync_unchecked = st.checkbox(
+        "Sync unchecked tickets across all columns",
+        value=True,
+        key="sync_unchecked_tickets",
+        help="When enabled, if you uncheck a ticket in one column, the same ticket is excluded from Reporter, Internal Reporter, Assignee, and Waiting Information From.",
+    )
+
     group_order = ["Reporter", "Internal Reporter", "Assignee", "Waiting Information From"]
     cols = st.columns(4)
+    edited_groups = {}
 
     for col, group_name in zip(cols, group_order):
         with col:
@@ -1645,6 +1660,7 @@ def page_am_handover():
 
             if df.empty:
                 st.info("No tickets found")
+                edited_groups[group_name] = pd.DataFrame()
                 continue
 
             visible_columns = ["Select", "T", "Key", "Open", "Summary", "Status", "Assignee", "Reporter"]
@@ -1670,20 +1686,55 @@ def page_am_handover():
                 disabled=[column for column in visible_columns if column != "Select"],
             )
 
-            selected_df = edited_df[edited_df["Select"] == True]
-            st.caption(f"Selected: {len(selected_df)} / {len(edited_df)}")
+            edited_groups[group_name] = edited_df.copy()
+            local_selected_count = int((edited_df["Select"] == True).sum())
+            st.caption(f"Selected here: {local_selected_count} / {len(edited_df)}")
 
-            for _, row in selected_df.iterrows():
-                selected_changes.append(
-                    {
-                        "Ticket": row["Key"],
-                        "Open": row["Open"],
-                        "Field": group_name,
-                        "From": st.session_state.get("loaded_current_person", current_person),
-                        "To": new_person,
-                        "Summary": row["Summary"],
-                    }
-                )
+    unchecked_keys = set()
+    for edited_df in edited_groups.values():
+        if edited_df is None or edited_df.empty or "Select" not in edited_df.columns:
+            continue
+        unchecked_keys.update(
+            edited_df.loc[edited_df["Select"] != True, "Key"]
+            .dropna()
+            .astype(str)
+            .str.upper()
+            .tolist()
+        )
+
+    selected_changes = []
+    synced_removed_count = 0
+
+    for group_name in group_order:
+        edited_df = edited_groups.get(group_name, pd.DataFrame())
+        if edited_df.empty:
+            continue
+
+        selected_df = edited_df[edited_df["Select"] == True].copy()
+        if sync_unchecked and unchecked_keys:
+            before_sync_count = len(selected_df)
+            selected_df = selected_df[~selected_df["Key"].astype(str).str.upper().isin(unchecked_keys)]
+            synced_removed_count += before_sync_count - len(selected_df)
+
+        for _, row in selected_df.iterrows():
+            selected_changes.append(
+                {
+                    "Ticket": row["Key"],
+                    "Open": row["Open"],
+                    "Field": group_name,
+                    "From": st.session_state.get("loaded_current_person", current_person),
+                    "To": new_person,
+                    "Summary": row["Summary"],
+                }
+            )
+
+    if sync_unchecked and unchecked_keys:
+        st.info(
+            f"Sync is ON: {len(unchecked_keys)} unchecked ticket key(s) are excluded from all columns. "
+            f"Synced removals from other columns: {synced_removed_count}."
+        )
+    elif not sync_unchecked:
+        st.warning("Sync is OFF: unchecked tickets are excluded only in the column where you unchecked them.")
 
     st.markdown('</div>', unsafe_allow_html=True)
 
