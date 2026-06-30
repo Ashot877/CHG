@@ -364,13 +364,133 @@ def jira_update_issue_fields(base_url, api_version, auth_type, username, token, 
 
 def make_user_payload(user_value, user_payload_type):
     user_value = (user_value or "").strip()
+
     if user_payload_type == "name":
         return {"name": user_value}
+
     if user_payload_type == "key":
         return {"key": user_value}
+
     if user_payload_type == "accountId":
         return {"accountId": user_value}
+
     return {"name": user_value}
+
+
+def user_values_to_compare(user_value):
+    values = []
+
+    if not user_value:
+        return values
+
+    if isinstance(user_value, str):
+        values.append(user_value)
+        return values
+
+    if isinstance(user_value, dict):
+        for key in ["name", "key", "accountId", "displayName", "emailAddress"]:
+            value = user_value.get(key)
+            if value:
+                values.append(str(value))
+
+    return values
+
+
+def user_matches(user_value, target_user):
+    target_user = (target_user or "").strip().lower()
+
+    if not target_user:
+        return False
+
+    for value in user_values_to_compare(user_value):
+        if value.strip().lower() == target_user:
+            return True
+
+    return False
+
+
+def user_to_payload(user_value, user_payload_type):
+    if isinstance(user_value, dict):
+        preferred_value = user_value.get(user_payload_type)
+
+        if not preferred_value:
+            for key in ["name", "key", "accountId"]:
+                if user_value.get(key):
+                    preferred_value = user_value.get(key)
+                    break
+
+        if preferred_value:
+            return make_user_payload(str(preferred_value), user_payload_type)
+
+    if isinstance(user_value, str):
+        return make_user_payload(user_value, user_payload_type)
+
+    return user_value
+
+
+def build_replaced_user_list(existing_users, old_user, new_user, user_payload_type):
+    if existing_users is None:
+        existing_users = []
+
+    if not isinstance(existing_users, list):
+        existing_users = [existing_users]
+
+    if (old_user or "").strip().lower() == (new_user or "").strip().lower():
+        return [
+            user_to_payload(existing_user, user_payload_type)
+            for existing_user in existing_users
+        ]
+
+    new_user_payload = make_user_payload(new_user, user_payload_type)
+    result = []
+    replaced = False
+
+    new_user_already_exists = any(
+        user_matches(existing_user, new_user)
+        for existing_user in existing_users
+    )
+
+    for existing_user in existing_users:
+        if user_matches(existing_user, old_user):
+            replaced = True
+
+            if not new_user_already_exists:
+                result.append(new_user_payload)
+
+            continue
+
+        result.append(user_to_payload(existing_user, user_payload_type))
+
+    if not replaced:
+        raise Exception(
+            f"Old user '{old_user}' was not found in the current field value. "
+            f"Field was not changed to avoid removing other users."
+        )
+
+    return result
+
+
+def jira_get_issue_field_value(
+    base_url,
+    api_version,
+    auth_type,
+    username,
+    token,
+    issue_key,
+    field_id,
+):
+    data = jira_request(
+        "GET",
+        base_url,
+        api_version,
+        auth_type,
+        username,
+        token,
+        f"/issue/{issue_key}",
+        params={"fields": field_id},
+    )
+
+    return data.get("fields", {}).get(field_id)
 
 
 def jira_update_assignee(base_url, api_version, auth_type, username, token, issue_key, new_user, user_payload_type):
@@ -429,6 +549,7 @@ def jira_apply_handover_change(
     token,
     issue_key,
     field_group,
+    old_user,
     new_user,
     user_payload_type,
     internal_reporter_field_id,
@@ -437,19 +558,86 @@ def jira_apply_handover_change(
     user_payload = make_user_payload(new_user, user_payload_type)
 
     if field_group == "Assignee":
-        jira_update_assignee(base_url, api_version, auth_type, username, token, issue_key, new_user, user_payload_type)
+        jira_update_assignee(
+            base_url,
+            api_version,
+            auth_type,
+            username,
+            token,
+            issue_key,
+            new_user,
+            user_payload_type,
+        )
         return
 
     if field_group == "Reporter":
-        jira_update_issue_fields(base_url, api_version, auth_type, username, token, issue_key, {"reporter": user_payload})
+        jira_update_issue_fields(
+            base_url,
+            api_version,
+            auth_type,
+            username,
+            token,
+            issue_key,
+            {"reporter": user_payload},
+        )
         return
 
     if field_group == "Internal Reporter":
-        jira_update_issue_fields(base_url, api_version, auth_type, username, token, issue_key, {internal_reporter_field_id: [user_payload]})
+        current_users = jira_get_issue_field_value(
+            base_url,
+            api_version,
+            auth_type,
+            username,
+            token,
+            issue_key,
+            internal_reporter_field_id,
+        )
+
+        updated_users = build_replaced_user_list(
+            current_users,
+            old_user,
+            new_user,
+            user_payload_type,
+        )
+
+        jira_update_issue_fields(
+            base_url,
+            api_version,
+            auth_type,
+            username,
+            token,
+            issue_key,
+            {internal_reporter_field_id: updated_users},
+        )
         return
 
     if field_group == "Waiting Information From":
-        jira_update_issue_fields(base_url, api_version, auth_type, username, token, issue_key, {waiting_info_field_id: [user_payload]})
+        current_users = jira_get_issue_field_value(
+            base_url,
+            api_version,
+            auth_type,
+            username,
+            token,
+            issue_key,
+            waiting_info_field_id,
+        )
+
+        updated_users = build_replaced_user_list(
+            current_users,
+            old_user,
+            new_user,
+            user_payload_type,
+        )
+
+        jira_update_issue_fields(
+            base_url,
+            api_version,
+            auth_type,
+            username,
+            token,
+            issue_key,
+            {waiting_info_field_id: updated_users},
+        )
         return
 
     raise Exception(f"Unknown field group: {field_group}")
@@ -1340,17 +1528,18 @@ def page_am_handover():
                 field_group = change["Field"]
                 try:
                     jira_apply_handover_change(
-                        jira_base_url,
-                        api_version,
-                        auth_type,
-                        username,
-                        token,
-                        issue_key,
-                        field_group,
-                        new_person,
-                        user_payload_type,
-                        internal_reporter_field_id,
-                        waiting_info_field_id,
+                    jira_base_url,
+                    api_version,
+                    auth_type,
+                    username,
+                    token,
+                    issue_key,
+                    field_group,
+                    change.get("From"),
+                    new_person,
+                    user_payload_type,
+                    internal_reporter_field_id,
+                     waiting_info_field_id,
                     )
                     results.append({"Ticket": issue_key, "Field": field_group, "Status": "Success"})
                 except Exception as e:
