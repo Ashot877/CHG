@@ -445,11 +445,11 @@ def jira_apply_handover_change(
         return
 
     if field_group == "Internal Reporter":
-        jira_update_issue_fields(base_url, api_version, auth_type, username, token, issue_key, {internal_reporter_field_id: user_payload})
+        jira_update_issue_fields(base_url, api_version, auth_type, username, token, issue_key, {internal_reporter_field_id: [user_payload]})
         return
 
     if field_group == "Waiting Information From":
-        jira_update_issue_fields(base_url, api_version, auth_type, username, token, issue_key, {waiting_info_field_id: user_payload})
+        jira_update_issue_fields(base_url, api_version, auth_type, username, token, issue_key, {waiting_info_field_id: [user_payload]})
         return
 
     raise Exception(f"Unknown field group: {field_group}")
