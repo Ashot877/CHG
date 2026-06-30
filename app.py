@@ -736,31 +736,9 @@ def jira_apply_handover_change(
         return
 
     if field_group == "Internal Reporter":
-        current_value = jira_get_issue_field_value(
-            base_url,
-            api_version,
-            auth_type,
-            username,
-            token,
-            issue_key,
-            internal_reporter_field_id,
-        )
-
-        # Internal Reporter is usually a single-user custom field in Jira.
-        # Single-user fields require an object like {"name": "user"}, not a list.
-        # If another Jira instance configures it as multi-user, keep the safer list replacement.
-        if isinstance(current_value, list):
-            updated_value = build_replaced_user_list(
-                current_value,
-                old_user,
-                new_user,
-                user_payload_type,
-            )
-        else:
-            # JQL already found this issue by Internal Reporter = old_user.
-            # For single-user fields, Jira wants only the new user object.
-            updated_value = user_payload
-
+        # Internal Reporter in this Jira is a single-user custom field.
+        # Jira requires an object like {"name": "user"}, not a list.
+        # Yes, the field looks innocent and still has opinions about JSON shapes.
         jira_update_issue_fields(
             base_url,
             api_version,
@@ -768,7 +746,7 @@ def jira_apply_handover_change(
             username,
             token,
             issue_key,
-            {internal_reporter_field_id: updated_value},
+            {internal_reporter_field_id: user_payload},
         )
         return
 
@@ -1134,8 +1112,74 @@ def clear_handover_results():
         "loaded_projects",
         "loaded_current_person",
         "confirm_handover",
+        "handover_synced_excluded_keys",
+        "handover_editor_version",
     ]:
         st.session_state.pop(key, None)
+
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("handover_editor_"):
+            st.session_state.pop(key, None)
+
+
+def safe_widget_suffix(value):
+    return re.sub(r"[^a-zA-Z0-9_]+", "_", str(value or "")).strip("_")
+
+
+def handover_editor_key(group_name, version=None):
+    if version is None:
+        version = int(st.session_state.get("handover_editor_version", 0))
+    return f"handover_editor_{safe_widget_suffix(group_name)}_{version}"
+
+
+def collect_selection_changes_from_editor_state(group_order, groups, version):
+    unchecked_keys = set()
+    checked_keys = set()
+
+    for group_name in group_order:
+        editor_key = handover_editor_key(group_name, version)
+        editor_state = st.session_state.get(editor_key)
+        if not isinstance(editor_state, dict):
+            continue
+
+        edited_rows = editor_state.get("edited_rows", {}) or {}
+        if not edited_rows:
+            continue
+
+        base_df = groups.get(group_name, pd.DataFrame())
+        if base_df is None or base_df.empty or "Key" not in base_df.columns:
+            continue
+
+        base_df = base_df.reset_index(drop=True)
+        for row_index, changes in edited_rows.items():
+            if not isinstance(changes, dict) or "Select" not in changes:
+                continue
+
+            try:
+                row_position = int(row_index)
+            except Exception:
+                continue
+
+            if row_position < 0 or row_position >= len(base_df):
+                continue
+
+            ticket_key = str(base_df.iloc[row_position].get("Key", "")).upper().strip()
+            if not ticket_key:
+                continue
+
+            if changes.get("Select") is True:
+                checked_keys.add(ticket_key)
+            elif changes.get("Select") is False:
+                unchecked_keys.add(ticket_key)
+
+    return checked_keys, unchecked_keys
+
+
+def apply_synced_selection_to_df(df, excluded_keys):
+    result = df.copy().reset_index(drop=True)
+    if excluded_keys and not result.empty and "Key" in result.columns and "Select" in result.columns:
+        result.loc[result["Key"].astype(str).str.upper().isin(excluded_keys), "Select"] = False
+    return result
 
 
 # =========================================================
@@ -1592,6 +1636,11 @@ def page_am_handover():
                     st.session_state.loaded_projects = projects
                     st.session_state.loaded_current_person = current_person
                     st.session_state.handover_search_errors = search_errors
+                    st.session_state.handover_synced_excluded_keys = []
+                    st.session_state.handover_editor_version = 0
+                    for key in list(st.session_state.keys()):
+                        if str(key).startswith("handover_editor_"):
+                            st.session_state.pop(key, None)
 
                 total = sum(len(df) for df in st.session_state.handover_groups.values())
                 search_errors = st.session_state.get("handover_search_errors", [])
@@ -1625,7 +1674,7 @@ def page_am_handover():
         with st.expander("Search warnings", expanded=False):
             st.dataframe(pd.DataFrame(search_errors), hide_index=True, use_container_width=True)
 
-    filtered_groups = {group_name: df.copy() for group_name, df in handover_groups.items()}
+    filtered_groups = {group_name: df.copy().reset_index(drop=True) for group_name, df in handover_groups.items()}
 
     total_visible = sum(len(df) for df in filtered_groups.values())
     unique_visible = len(set().union(*[set(df["Key"].tolist()) for df in filtered_groups.values() if not df.empty])) if filtered_groups else 0
@@ -1642,16 +1691,57 @@ def page_am_handover():
         loaded_project_count = len(st.session_state.get("loaded_projects", []))
         st.markdown(f'<div class="metric-card"><div class="metric-number">{loaded_project_count}</div><div class="metric-label">Loaded projects</div></div>', unsafe_allow_html=True)
 
-    sync_unchecked = st.checkbox(
-        "Sync unchecked tickets across all columns",
-        value=True,
-        key="sync_unchecked_tickets",
-        help="When enabled, if you uncheck a ticket in one column, the same ticket is excluded from Reporter, Internal Reporter, Assignee, and Waiting Information From.",
-    )
+    st.write("")
+    selection_col1, selection_col2, selection_col3 = st.columns([1.15, 2.65, 1.15])
+    with selection_col1:
+        sync_unchecked = st.checkbox(
+            "Sync selection",
+            value=True,
+            key="sync_unchecked_tickets",
+            help="When enabled, if you uncheck a ticket in one column, the same ticket is unchecked in all handover columns.",
+        )
+    with selection_col2:
+        st.caption(
+            "When sync is ON, removing a ticket from Reporter also removes it from Internal Reporter, Assignee, and Waiting Information From. "
+            "Tiny mercy for duplicate rows, since Jira apparently enjoys hide-and-seek."
+        )
+    with selection_col3:
+        if st.button("Reset selection", use_container_width=True, key="reset_handover_selection"):
+            st.session_state.handover_synced_excluded_keys = []
+            st.session_state.handover_editor_version = int(st.session_state.get("handover_editor_version", 0)) + 1
+            for key in list(st.session_state.keys()):
+                if str(key).startswith("handover_editor_"):
+                    st.session_state.pop(key, None)
+            st.rerun()
 
     group_order = ["Reporter", "Internal Reporter", "Assignee", "Waiting Information From"]
+
+    previous_version = int(st.session_state.get("handover_editor_version", 0))
+    stored_excluded_keys = set(st.session_state.get("handover_synced_excluded_keys", []))
+
+    if sync_unchecked:
+        checked_keys, unchecked_keys = collect_selection_changes_from_editor_state(group_order, filtered_groups, previous_version)
+        updated_excluded_keys = (stored_excluded_keys | unchecked_keys) - checked_keys
+        if updated_excluded_keys != stored_excluded_keys:
+            st.session_state.handover_synced_excluded_keys = sorted(updated_excluded_keys)
+            st.session_state.handover_editor_version = previous_version + 1
+            for key in list(st.session_state.keys()):
+                if str(key).startswith("handover_editor_"):
+                    st.session_state.pop(key, None)
+            st.rerun()
+    else:
+        updated_excluded_keys = set()
+
+    sync_excluded_keys = set(st.session_state.get("handover_synced_excluded_keys", [])) if sync_unchecked else set()
+
+    if sync_unchecked and sync_excluded_keys:
+        st.info(f"Sync is ON: {len(sync_excluded_keys)} ticket key(s) are unchecked in all columns: {', '.join(sorted(sync_excluded_keys))}")
+    elif not sync_unchecked:
+        st.warning("Sync is OFF: unchecked tickets affect only the column where you changed them.")
+
     cols = st.columns(4)
     edited_groups = {}
+    current_editor_version = int(st.session_state.get("handover_editor_version", 0))
 
     for col, group_name in zip(cols, group_order):
         with col:
@@ -1669,12 +1759,14 @@ def page_am_handover():
             if group_name == "Waiting Information From":
                 visible_columns.append("Waiting information from")
 
+            editor_input_df = apply_synced_selection_to_df(df[visible_columns], sync_excluded_keys)
+
             edited_df = st.data_editor(
-                df[visible_columns],
+                editor_input_df,
                 hide_index=True,
                 use_container_width=True,
                 height=460,
-                key=f"handover_editor_{group_name}",
+                key=handover_editor_key(group_name, current_editor_version),
                 column_config={
                     "Select": st.column_config.CheckboxColumn("Select", default=True),
                     "T": jira_icon_column("T"),
@@ -1690,20 +1782,7 @@ def page_am_handover():
             local_selected_count = int((edited_df["Select"] == True).sum())
             st.caption(f"Selected here: {local_selected_count} / {len(edited_df)}")
 
-    unchecked_keys = set()
-    for edited_df in edited_groups.values():
-        if edited_df is None or edited_df.empty or "Select" not in edited_df.columns:
-            continue
-        unchecked_keys.update(
-            edited_df.loc[edited_df["Select"] != True, "Key"]
-            .dropna()
-            .astype(str)
-            .str.upper()
-            .tolist()
-        )
-
     selected_changes = []
-    synced_removed_count = 0
 
     for group_name in group_order:
         edited_df = edited_groups.get(group_name, pd.DataFrame())
@@ -1711,10 +1790,8 @@ def page_am_handover():
             continue
 
         selected_df = edited_df[edited_df["Select"] == True].copy()
-        if sync_unchecked and unchecked_keys:
-            before_sync_count = len(selected_df)
-            selected_df = selected_df[~selected_df["Key"].astype(str).str.upper().isin(unchecked_keys)]
-            synced_removed_count += before_sync_count - len(selected_df)
+        if sync_unchecked and sync_excluded_keys:
+            selected_df = selected_df[~selected_df["Key"].astype(str).str.upper().isin(sync_excluded_keys)]
 
         for _, row in selected_df.iterrows():
             selected_changes.append(
@@ -1727,15 +1804,6 @@ def page_am_handover():
                     "Summary": row["Summary"],
                 }
             )
-
-    if sync_unchecked and unchecked_keys:
-        st.info(
-            f"Sync is ON: {len(unchecked_keys)} unchecked ticket key(s) are excluded from all columns. "
-            f"Synced removals from other columns: {synced_removed_count}."
-        )
-    elif not sync_unchecked:
-        st.warning("Sync is OFF: unchecked tickets are excluded only in the column where you unchecked them.")
-
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
