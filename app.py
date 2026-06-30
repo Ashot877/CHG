@@ -1,4 +1,5 @@
 import base64
+import json
 import re
 import zipfile
 from collections import defaultdict
@@ -347,6 +348,158 @@ def jira_search(base_url, api_version, auth_type, username, token, jql, fields):
             break
 
     return all_issues
+
+
+
+def summarize_exception(error, limit=520):
+    """Return a short readable Jira error. Keeps the UI calm instead of screaming HTML at people."""
+    text = str(error or "").strip()
+    if not text:
+        return "Unknown error"
+
+    json_start = text.find("{")
+    if json_start != -1:
+        try:
+            payload = json.loads(text[json_start:])
+            messages = payload.get("errorMessages") or []
+            errors = payload.get("errors") or {}
+            parts = []
+            if messages:
+                parts.extend([str(item) for item in messages if item])
+            if errors:
+                parts.extend([f"{key}: {value}" for key, value in errors.items()])
+            if parts:
+                text = "; ".join(parts)
+        except Exception:
+            pass
+
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = " ".join(text.split())
+    if len(text) > limit:
+        return text[: limit - 3] + "..."
+    return text
+
+
+def jira_user_picker_search(base_url, api_version, auth_type, username, token, query, max_results=20):
+    query = (query or "").strip()
+    if not query:
+        return []
+
+    data = jira_request(
+        "GET",
+        base_url,
+        api_version,
+        auth_type,
+        username,
+        token,
+        "/user/picker",
+        params={"query": query, "maxResults": max_results},
+    )
+
+    users = data.get("users", []) if isinstance(data, dict) else []
+    result = []
+    seen = set()
+    for user in users:
+        clean_user = {
+            "displayName": user.get("displayName") or user.get("name") or user.get("key") or "",
+            "name": user.get("name") or "",
+            "key": user.get("key") or "",
+            "accountId": user.get("accountId") or "",
+            "emailAddress": user.get("emailAddress") or "",
+        }
+        identifier = clean_user.get("name") or clean_user.get("key") or clean_user.get("accountId") or clean_user.get("displayName")
+        if not identifier:
+            continue
+        dedupe_key = identifier.lower()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        result.append(clean_user)
+    return result
+
+
+def user_identifier_for_payload(user, user_payload_type):
+    if not isinstance(user, dict):
+        return ""
+    preferred = user.get(user_payload_type)
+    if preferred:
+        return str(preferred)
+    for key in ["name", "key", "accountId", "emailAddress", "displayName"]:
+        value = user.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def user_suggestion_label(user, user_payload_type):
+    identifier = user_identifier_for_payload(user, user_payload_type)
+    display_name = user.get("displayName") or identifier
+    if display_name and identifier and display_name != identifier:
+        return f"{display_name}  ·  {identifier}"
+    return identifier or display_name or "Unknown user"
+
+
+def jira_jql_field_suggestions(base_url, api_version, auth_type, username, token, field_name, field_value, max_results=20):
+    field_value = (field_value or "").strip()
+    if not field_value:
+        return []
+
+    data = jira_request(
+        "GET",
+        base_url,
+        api_version,
+        auth_type,
+        username,
+        token,
+        "/jql/autocompletedata/suggestions",
+        params={"fieldName": field_name, "fieldValue": field_value, "maxResults": max_results},
+    )
+
+    raw_results = []
+    if isinstance(data, dict):
+        raw_results = data.get("results") or data.get("suggestions") or []
+    elif isinstance(data, list):
+        raw_results = data
+
+    suggestions = []
+    seen = set()
+    for item in raw_results:
+        if isinstance(item, dict):
+            value = str(item.get("value") or item.get("name") or item.get("displayName") or "").strip()
+            display_name = str(item.get("displayName") or item.get("label") or value).strip()
+        else:
+            value = str(item).strip()
+            display_name = value
+        if not value:
+            continue
+        clean_value = value.strip('"')
+        dedupe_key = clean_value.lower()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        suggestions.append({"value": clean_value, "displayName": display_name or clean_value})
+        if len(suggestions) >= max_results:
+            break
+    return suggestions
+
+
+def suggestion_label(item):
+    value = item.get("value", "")
+    display_name = item.get("displayName") or value
+    if display_name and value and display_name != value:
+        return f"{display_name}  ·  {value}"
+    return value or display_name
+
+
+def append_values_to_text_area(existing_text, values):
+    existing = parse_projects(existing_text)
+    seen = {item.lower() for item in existing}
+    for value in values:
+        value = (value or "").strip()
+        if value and value.lower() not in seen:
+            existing.append(value)
+            seen.add(value.lower())
+    return "\n".join(existing)
 
 
 def jira_update_issue_fields(base_url, api_version, auth_type, username, token, issue_key, fields_payload):
@@ -969,6 +1122,7 @@ def clear_handover_results():
     for key in [
         "handover_groups",
         "handover_jqls",
+        "handover_search_errors",
         "loaded_projects",
         "loaded_current_person",
         "confirm_handover",
@@ -1266,6 +1420,14 @@ def page_domain_grouper():
 
 
 def page_am_handover():
+    for state_key, widget_key in [
+        ("pending_project_input", "project_input"),
+        ("pending_from_user", "handover_current"),
+        ("pending_to_user", "handover_new"),
+    ]:
+        if state_key in st.session_state:
+            st.session_state[widget_key] = st.session_state.pop(state_key)
+
     render_hero(
         "AM Handover",
         "Search Change Management tickets by Partner / Project, review the results, and transfer only the selected user fields.",
@@ -1307,6 +1469,88 @@ def page_am_handover():
         search_handover = st.button("Search tickets", type="primary", use_container_width=True)
 
     projects = parse_projects(project_input)
+
+    with st.expander("Jira search helpers", expanded=False):
+        st.caption("Search users and Partner / Project values directly from Jira. It is not Jira's exact autocomplete UI, but it saves you from copy-pasting names like a medieval scribe.")
+        helper_col1, helper_col2 = st.columns(2)
+
+        with helper_col1:
+            st.markdown("**Find Partner / Project**")
+            partner_lookup = st.text_input("Partner search text", value="", placeholder="Betibas / Ganaexpress / project name", key="partner_lookup_text")
+            if st.button("Search partner values", use_container_width=True, key="search_partner_values"):
+                if require_jira_settings():
+                    try:
+                        st.session_state.partner_suggestions = jira_jql_field_suggestions(
+                            jira_base_url,
+                            api_version,
+                            auth_type,
+                            username,
+                            token,
+                            "Partner / Project",
+                            partner_lookup,
+                            max_results=25,
+                        )
+                    except Exception as e:
+                        st.session_state.partner_suggestions = []
+                        st.warning("Partner / Project suggestions failed. Jira may not expose autocomplete for this custom field.")
+                        st.caption(summarize_exception(e))
+
+            partner_suggestions = st.session_state.get("partner_suggestions", [])
+            if partner_suggestions:
+                partner_labels = [suggestion_label(item) for item in partner_suggestions]
+                picked_partner_labels = st.multiselect("Choose values to add", options=partner_labels, key="picked_partner_labels")
+                if st.button("Add selected Partner / Project", use_container_width=True, key="add_partner_values"):
+                    selected_values = [partner_suggestions[partner_labels.index(label)]["value"] for label in picked_partner_labels]
+                    st.session_state.pending_project_input = append_values_to_text_area(project_input, selected_values)
+                    st.rerun()
+            elif partner_lookup:
+                st.caption("No partner suggestions loaded yet.")
+
+        with helper_col2:
+            st.markdown("**Find Jira user**")
+            user_lookup = st.text_input("User search text", value="", placeholder="asthghik.sa / name.surname", key="user_lookup_text")
+            if st.button("Search users", use_container_width=True, key="search_jira_users"):
+                if require_jira_settings():
+                    try:
+                        st.session_state.user_suggestions = jira_user_picker_search(
+                            jira_base_url,
+                            api_version,
+                            auth_type,
+                            username,
+                            token,
+                            user_lookup,
+                            max_results=25,
+                        )
+                    except Exception as e:
+                        st.session_state.user_suggestions = []
+                        st.warning("User search failed.")
+                        st.caption(summarize_exception(e))
+
+            user_suggestions = st.session_state.get("user_suggestions", [])
+            if user_suggestions:
+                user_labels = [user_suggestion_label(item, user_payload_type) for item in user_suggestions]
+                picked_user_label = st.selectbox("Choose user", options=user_labels, key="picked_jira_user")
+                picked_user = user_suggestions[user_labels.index(picked_user_label)]
+                picked_identifier = user_identifier_for_payload(picked_user, user_payload_type)
+                u1, u2 = st.columns(2)
+                with u1:
+                    if st.button("Set as From user", use_container_width=True, key="set_from_user"):
+                        st.session_state.pending_from_user = picked_identifier
+                        st.rerun()
+                with u2:
+                    if st.button("Set as To user", use_container_width=True, key="set_to_user"):
+                        st.session_state.pending_to_user = picked_identifier
+                        st.rerun()
+            elif user_lookup:
+                st.caption("No user suggestions loaded yet.")
+
+    if projects and current_person.strip():
+        with st.expander("Generated JQL preview", expanded=True):
+            preview_jqls = build_handover_jqls(projects, current_person)
+            for group_name, jql in preview_jqls.items():
+                st.markdown(f"**{group_name}**")
+                st.code(jql, language="sql")
+
     st.markdown('</div>', unsafe_allow_html=True)
 
     if search_handover:
@@ -1323,6 +1567,8 @@ def page_am_handover():
                     fields = ["summary", "status", "issuetype", "assignee", "reporter", "created", "updated"] + [field for field in extra_fields if field]
 
                     handover_groups = {}
+                    search_errors = []
+                    empty_columns = ["Select", "T", "Issue Type", "Key", "Open", "Summary", "Status", "Assignee", "Reporter", "Internal Reporter", "Waiting information from", "Updated"]
                     for group_name, jql in jqls.items():
                         try:
                             issues = jira_search(jira_base_url, api_version, auth_type, username, token, jql, fields)
@@ -1330,17 +1576,29 @@ def page_am_handover():
                                 [issue_to_handover_row(issue, jira_base_url, field_map, auth_type, username, token) for issue in issues]
                             )
                         except Exception as e:
-                            st.error(f"Failed to load group: {group_name}")
-                            st.code(str(e))
-                            handover_groups[group_name] = pd.DataFrame(columns=["Select", "T", "Issue Type", "Key", "Open", "Summary", "Status", "Assignee", "Reporter", "Internal Reporter", "Waiting information from", "Updated"])
+                            search_errors.append({"Group": group_name, "Message": summarize_exception(e)})
+                            handover_groups[group_name] = pd.DataFrame(columns=empty_columns)
 
                     st.session_state.handover_groups = handover_groups
                     st.session_state.handover_jqls = jqls
                     st.session_state.loaded_projects = projects
                     st.session_state.loaded_current_person = current_person
+                    st.session_state.handover_search_errors = search_errors
 
                 total = sum(len(df) for df in st.session_state.handover_groups.values())
-                st.success(f"Loaded {total} ticket rows.")
+                search_errors = st.session_state.get("handover_search_errors", [])
+                if search_errors:
+                    unique_messages = sorted({item["Message"] for item in search_errors})
+                    if len(search_errors) == 4 and len(unique_messages) == 1:
+                        st.warning("Jira did not accept the generated JQL. Most likely Partner / Project or user value is written incorrectly.")
+                        st.caption(unique_messages[0])
+                    else:
+                        st.warning(f"Loaded with {len(search_errors)} group error(s). Check the compact error table below.")
+                        st.dataframe(pd.DataFrame(search_errors), hide_index=True, use_container_width=True)
+                if total:
+                    st.success(f"Loaded {total} ticket rows.")
+                elif not search_errors:
+                    st.info("Search completed. No tickets found.")
             except Exception as e:
                 st.error("Handover search failed")
                 st.code(str(e))
@@ -1352,39 +1610,14 @@ def page_am_handover():
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Review tickets")
-    st.caption("Open tickets, uncheck rows you do not want to update, or exclude keys manually.")
+    st.caption("Open tickets and uncheck rows you do not want to update. The active JQL is shown in the preview above.")
 
-    filter_col1, filter_col2, filter_col3 = st.columns([1.5, 2, 2])
-    with filter_col1:
-        search_text = st.text_input("Filter by key / summary / status", value="", key="handover_filter_text")
-    with filter_col2:
-        exclude_keys_raw = st.text_area(
-            "Exclude ticket keys",
-            value="",
-            height=70,
-            placeholder="CHG-123456, CHG-987654",
-            key="exclude_keys_raw",
-        )
-    with filter_col3:
-        st.write("")
-        st.caption("Same ticket can appear in several columns if several fields need handover. Annoying, but accurate.")
+    search_errors = st.session_state.get("handover_search_errors", [])
+    if search_errors:
+        with st.expander("Search warnings", expanded=False):
+            st.dataframe(pd.DataFrame(search_errors), hide_index=True, use_container_width=True)
 
-    exclude_keys = parse_ticket_keys(exclude_keys_raw)
-    search_query = search_text.strip().lower()
-    filtered_groups = {}
-
-    for group_name, df in handover_groups.items():
-        group_df = df.copy()
-        if exclude_keys and not group_df.empty:
-            group_df = group_df[~group_df["Key"].str.upper().isin(exclude_keys)]
-        if search_query and not group_df.empty:
-            mask = (
-                group_df["Key"].fillna("").str.lower().str.contains(search_query)
-                | group_df["Summary"].fillna("").str.lower().str.contains(search_query)
-                | group_df["Status"].fillna("").str.lower().str.contains(search_query)
-            )
-            group_df = group_df[mask]
-        filtered_groups[group_name] = group_df
+    filtered_groups = {group_name: df.copy() for group_name, df in handover_groups.items()}
 
     total_visible = sum(len(df) for df in filtered_groups.values())
     unique_visible = len(set().union(*[set(df["Key"].tolist()) for df in filtered_groups.values() if not df.empty])) if filtered_groups else 0
@@ -1395,7 +1628,8 @@ def page_am_handover():
     with result_metrics[1]:
         st.markdown(f'<div class="metric-card"><div class="metric-number">{unique_visible}</div><div class="metric-label">Unique tickets</div></div>', unsafe_allow_html=True)
     with result_metrics[2]:
-        st.markdown(f'<div class="metric-card"><div class="metric-number">{len(exclude_keys)}</div><div class="metric-label">Excluded keys</div></div>', unsafe_allow_html=True)
+        search_warning_count = len(st.session_state.get("handover_search_errors", []))
+        st.markdown(f'<div class="metric-card"><div class="metric-number">{search_warning_count}</div><div class="metric-label">Search warnings</div></div>', unsafe_allow_html=True)
     with result_metrics[3]:
         loaded_project_count = len(st.session_state.get("loaded_projects", []))
         st.markdown(f'<div class="metric-card"><div class="metric-number">{loaded_project_count}</div><div class="metric-label">Loaded projects</div></div>', unsafe_allow_html=True)
@@ -1492,10 +1726,16 @@ def page_am_handover():
                 st.error("Waiting information from field id was not found. Add it in .streamlit/secrets.toml.")
                 st.stop()
 
+            total_changes = len(selected_changes)
             results = []
-            for change in selected_changes:
+            progress_text = st.empty()
+            progress_bar = st.progress(0)
+            live_results = st.empty()
+
+            for index, change in enumerate(selected_changes, start=1):
                 issue_key = change["Ticket"]
                 field_group = change["Field"]
+                progress_text.info(f"Updating {index}/{total_changes}: {issue_key} · {field_group}")
                 try:
                     jira_apply_handover_change(
                         jira_base_url,
@@ -1511,11 +1751,16 @@ def page_am_handover():
                         internal_reporter_field_id,
                         waiting_info_field_id,
                     )
-                    results.append({"Ticket": issue_key, "Field": field_group, "Status": "Success"})
+                    results.append({"#": index, "Ticket": issue_key, "Field": field_group, "Status": "Success"})
                 except Exception as e:
-                    results.append({"Ticket": issue_key, "Field": field_group, "Status": "Failed", "Message": str(e)[:500]})
+                    results.append({"#": index, "Ticket": issue_key, "Field": field_group, "Status": "Failed", "Message": summarize_exception(e)})
 
-            st.dataframe(pd.DataFrame(results), hide_index=True, use_container_width=True)
+                progress_bar.progress(index / max(total_changes, 1))
+                live_results.dataframe(pd.DataFrame(results), hide_index=True, use_container_width=True)
+
+            success_count = sum(1 for item in results if item.get("Status") == "Success")
+            failed_count = sum(1 for item in results if item.get("Status") == "Failed")
+            progress_text.success(f"Finished: {success_count}/{total_changes} updated, {failed_count} failed.")
         except Exception as e:
             st.error("Apply failed")
             st.code(str(e))
