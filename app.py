@@ -351,6 +351,18 @@ def jira_search(base_url, api_version, auth_type, username, token, jql, fields):
 
 
 
+def jira_add_comment(base_url, api_version, auth_type, username, token, issue_key, body):
+    """Add a plain-text Jira comment to one issue."""
+    body = (body or "").strip()
+    if not body:
+        raise ValueError("Comment cannot be empty.")
+
+    return jira_request(
+        "POST", base_url, api_version, auth_type, username, token,
+        f"/issue/{issue_key}/comment", json={"body": body}
+    )
+
+
 def summarize_exception(error, limit=520):
     """Return a short readable Jira error. Keeps the UI calm instead of screaming HTML at people."""
     text = str(error or "").strip()
@@ -959,6 +971,235 @@ def jira_icon_column(label="T"):
 
 
 # =========================================================
+# WEEKLY TASKS HELPER
+# =========================================================
+WEEKLY_TASKS = {
+    "AM Time to Review": {
+        "group_field": "Internal Reporter",
+        "subtasks": {
+            "Breached": {
+                "jql": '''issuetype in (Change, "Configuration Change", Questions)
+AND statusCategory != Done
+AND (
+    (status = "Internal Review" AND slaFunction = isBreached("AM_Time to review"))
+    OR
+    (status = "In review by AM" AND slaFunction = isBreached("In_review by AM"))
+)''',
+                "comment": "Contacted {name} to inform that the ticket is breached",
+            },
+            "Critical Zone": {
+                "jql": '''issuetype in (Change, "Configuration Change", Questions)
+AND statusCategory != Done
+AND (
+    (status = "Internal Review" AND slaFunction = isInCriticalZone("AM_Time to review"))
+    OR
+    (status = "In review by AM" AND slaFunction = isInCriticalZone("In_review by AM"))
+)''',
+                "comment": "Contacted {name} to inform that the ticket will be breached",
+            },
+        },
+    },
+    "Change Approval": {
+        "group_field": "Assignee",
+        "subtasks": {
+            "Breached": {
+                "jql": '''project = "Change Management"
+AND status = "Change Approval"
+AND (
+    slaFunction = isBreached("Change_Time to Approve")
+    OR
+    slaFunction = isBreached("Config Change_Time to approve")
+)''',
+                "comment": "Contacted {name} to inform them that the ticket has breached",
+            },
+        },
+    },
+    "Config Change Resolution": {
+        "group_field": "Assignee",
+        "subtasks": {
+            "Breached": {
+                "jql": '''issuetype = "Configuration Change"
+AND slaFunction = isBreached("Config Change_Resolution time")
+AND statusCategory != Done
+AND component NOT IN ("design_request_SLA")
+AND status NOT IN (
+    "Blocked", "On Hold", "Waiting for Provider response",
+    "Waiting for information", "Waiting for Partner's Verification"
+)''',
+                "comment": "Contacted {name} to inform that the ticket is breached",
+            },
+            "Critical Zone": {
+                "jql": '''issuetype = "Configuration Change"
+AND (
+    slaFunction = isInCriticalZone("Config Change_Resolution time")
+    OR slaFunction = isInCriticalZone("Config Change_Time to Resolution_Casino Games")
+)
+AND statusCategory != Done
+AND status NOT IN (
+    "Blocked", "On Hold", "Waiting for Provider response",
+    "Waiting for information", "Waiting for Partner's Verification"
+)''',
+                "comment": "Contacted {name} to inform that the ticket will be breached",
+            },
+        },
+    },
+}
+
+
+def weekly_task_state_key(task_name, subtask_name):
+    safe = re.sub(r"[^a-zA-Z0-9]+", "_", f"{task_name}_{subtask_name}").strip("_").lower()
+    return f"weekly_tasks_{safe}"
+
+
+def weekly_issue_row(issue, base_url, group_field_id=None):
+    fields = issue.get("fields", {}) or {}
+    key = issue.get("key", "")
+    group_value = fields.get(group_field_id) if group_field_id else fields.get("assignee")
+    group_name = user_display(group_value) or "Unassigned"
+    return {
+        "Select": True,
+        "Key": key,
+        "Open": f"{clean_base_url(base_url)}/browse/{key}",
+        "Summary": compact(fields.get("summary", ""), 170),
+        "Status": field_to_text(fields.get("status")),
+        "Responsible": group_name,
+        "Updated": fields.get("updated", ""),
+    }
+
+
+def page_weekly_tasks_helper():
+    render_hero(
+        "Weekly Tasks Helper",
+        "Load SLA queues, group tickets by the responsible person, and add a controlled Jira comment to selected tickets.",
+        ["SLA", "Grouped queues", "Bulk comments"],
+    )
+
+    jira_base_url, api_version, auth_type, username, token, _ = current_jira_context()
+    top1, top2 = st.columns(2)
+    task_name = top1.selectbox("Task", list(WEEKLY_TASKS.keys()), key="weekly_task_name")
+    task_config = WEEKLY_TASKS[task_name]
+    subtask_name = top2.selectbox(
+        "Category", list(task_config["subtasks"].keys()), key=f"weekly_subtask_{task_name}"
+    )
+    subtask_config = task_config["subtasks"][subtask_name]
+    state_key = weekly_task_state_key(task_name, subtask_name)
+
+    with st.expander("JQL", expanded=False):
+        st.code(subtask_config["jql"], language="sql")
+
+    load_col, clear_col, info_col = st.columns([1, 1, 3])
+    load_clicked = load_col.button("Load tickets", type="primary", use_container_width=True)
+    clear_clicked = clear_col.button("Clear", use_container_width=True)
+    info_col.caption(f"Grouped by: **{task_config['group_field']}**")
+
+    if clear_clicked:
+        st.session_state.pop(state_key, None)
+        st.rerun()
+
+    if load_clicked:
+        if not require_jira_settings():
+            return
+        try:
+            with st.spinner("Loading Jira tickets..."):
+                group_field_id = None
+                if task_config["group_field"] == "Internal Reporter":
+                    field_map = get_field_map(
+                        jira_base_url, api_version, auth_type, username, token, MANUAL_FIELD_IDS
+                    )
+                    group_field_id = field_map.get("Internal Reporter")
+                    if not group_field_id:
+                        raise Exception(
+                            "Internal Reporter field id was not found. Add it under "
+                            "[manual_field_ids] in .streamlit/secrets.toml or verify the Jira field name."
+                        )
+
+                fields = ["summary", "status", "assignee", "updated"]
+                if group_field_id:
+                    fields.append(group_field_id)
+                issues = jira_search(
+                    jira_base_url, api_version, auth_type, username, token,
+                    subtask_config["jql"], fields
+                )
+                st.session_state[state_key] = [
+                    weekly_issue_row(issue, jira_base_url, group_field_id) for issue in issues
+                ]
+        except Exception as error:
+            st.error(f"Jira search failed: {summarize_exception(error)}")
+
+    rows = st.session_state.get(state_key)
+    if rows is None:
+        st.info("Choose a task and load tickets.")
+        return
+    if not rows:
+        st.success("No matching tickets found.")
+        return
+
+    groups = defaultdict(list)
+    for row in rows:
+        groups[row.get("Responsible") or "Unassigned"].append(row)
+
+    metric1, metric2 = st.columns(2)
+    metric1.metric("Tickets", len(rows))
+    metric2.metric("Responsible people", len(groups))
+    st.caption(
+        "Comments are added only to checked tickets after confirmation. "
+        "The text stays editable before sending, because bulk comments deserve at least one guardrail."
+    )
+
+    for group_index, (person_name, group_rows) in enumerate(sorted(groups.items(), key=lambda item: item[0].lower())):
+        with st.expander(f"{person_name} · {len(group_rows)} ticket(s)", expanded=True):
+            editor_key = f"{state_key}_editor_{group_index}"
+            edited_df = st.data_editor(
+                pd.DataFrame(group_rows), key=editor_key, hide_index=True,
+                use_container_width=True,
+                disabled=["Key", "Open", "Summary", "Status", "Responsible", "Updated"],
+                column_config={
+                    "Select": st.column_config.CheckboxColumn("Select", default=True),
+                    "Open": st.column_config.LinkColumn("Open", display_text="Open"),
+                    "Summary": st.column_config.TextColumn("Summary", width="large"),
+                    "Updated": st.column_config.DatetimeColumn("Updated", format="DD/MM/YYYY HH:mm"),
+                },
+            )
+            selected_keys = edited_df.loc[edited_df["Select"] == True, "Key"].tolist()
+            default_comment = subtask_config["comment"].format(name=person_name)
+            comment_text = st.text_area(
+                "Comment to add", value=default_comment,
+                key=f"{state_key}_comment_{group_index}", height=90
+            )
+            confirmed = st.checkbox(
+                f"Confirm adding this comment to {len(selected_keys)} selected ticket(s)",
+                key=f"{state_key}_confirm_{group_index}"
+            )
+            if st.button(
+                f"Add comment to selected ({len(selected_keys)})",
+                key=f"{state_key}_send_{group_index}",
+                disabled=not selected_keys or not confirmed or not comment_text.strip(),
+                use_container_width=True,
+            ):
+                results = []
+                progress = st.progress(0)
+                for index, issue_key in enumerate(selected_keys, start=1):
+                    try:
+                        jira_add_comment(
+                            jira_base_url, api_version, auth_type, username, token,
+                            issue_key, comment_text
+                        )
+                        results.append({"Key": issue_key, "Status": "Success", "Details": "Comment added"})
+                    except Exception as error:
+                        results.append({"Key": issue_key, "Status": "Failed", "Details": summarize_exception(error)})
+                    progress.progress(index / len(selected_keys))
+
+                result_df = pd.DataFrame(results)
+                success_count = int((result_df["Status"] == "Success").sum())
+                failed_count = len(result_df) - success_count
+                if failed_count:
+                    st.warning(f"Finished: {success_count} succeeded, {failed_count} failed.")
+                else:
+                    st.success(f"Comment added to {success_count} ticket(s).")
+                st.dataframe(result_df, hide_index=True, use_container_width=True)
+
+
+# =========================================================
 # ROX DOMAIN GROUPER
 # =========================================================
 PROJECT_PATTERNS = {
@@ -1273,7 +1514,7 @@ def sidebar_nav():
 
     page = st.sidebar.radio(
         "Navigation",
-        ["Dashboard", "AM Handover", "ROX Domain Grouper", "Excel Splitter", "Settings"],
+        ["Dashboard", "AM Handover", "Weekly Tasks Helper", "ROX Domain Grouper", "Excel Splitter", "Settings"],
         label_visibility="collapsed",
     )
 
@@ -1295,11 +1536,11 @@ def sidebar_nav():
 def page_dashboard():
     render_hero(
         "Change Helper",
-        "One clean internal tool for daily Change Management work: handover tickets, group ROX domains, and split Excel files.",
-        ["AM Handover", "ROX", "Excel", "Jira API"],
+        "One clean internal tool for daily Change Management work: handover tickets, process SLA queues, group ROX domains, and split Excel files.",
+        ["AM Handover", "Weekly Tasks", "ROX", "Excel", "Jira API"],
     )
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.markdown(
             """
@@ -1314,13 +1555,23 @@ def page_dashboard():
         st.markdown(
             """
             <div class="mini-card">
+              <div class="tool-card-title">⏱️ Weekly Tasks Helper</div>
+              <div class="tool-card-text">Load SLA queues, group tickets by responsible person, and add controlled comments to selected issues.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with c3:
+        st.markdown(
+            """
+            <div class="mini-card">
               <div class="tool-card-title">📡 ROX Domain Grouper</div>
               <div class="tool-card-text">Paste domains, auto-detect projects, remove duplicates, and produce a clean ready-to-copy message.</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
-    with c3:
+    with c4:
         st.markdown(
             """
             <div class="mini-card">
@@ -1902,6 +2153,8 @@ if page == "Dashboard":
     page_dashboard()
 elif page == "AM Handover":
     page_am_handover()
+elif page == "Weekly Tasks Helper":
+    page_weekly_tasks_helper()
 elif page == "ROX Domain Grouper":
     page_domain_grouper()
 elif page == "Excel Splitter":
