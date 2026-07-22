@@ -4,6 +4,7 @@ import re
 import zipfile
 from collections import defaultdict
 from io import BytesIO
+from urllib.parse import quote
 
 import pandas as pd
 import requests
@@ -1138,65 +1139,145 @@ def page_weekly_tasks_helper():
     for row in rows:
         groups[row.get("Responsible") or "Unassigned"].append(row)
 
-    metric1, metric2 = st.columns(2)
-    metric1.metric("Tickets", len(rows))
-    metric2.metric("Responsible people", len(groups))
+    total_people = len(groups)
+    largest_group = max((len(items) for items in groups.values()), default=0)
+    metric1, metric2, metric3 = st.columns(3)
+    metric1.metric("Total tickets", len(rows))
+    metric2.metric("Responsible people", total_people)
+    metric3.metric("Largest queue", largest_group)
+
+    summary_rows = []
+    for person_name, person_rows in sorted(
+        groups.items(), key=lambda item: (-len(item[1]), item[0].lower())
+    ):
+        keys = [row["Key"] for row in person_rows if row.get("Key")]
+        key_jql = "key in (" + ", ".join(keys) + ")"
+        filter_url = f"{clean_base_url(jira_base_url)}/issues/?jql={quote(key_jql)}"
+        summary_rows.append({
+            "Responsible": person_name,
+            "Tickets": len(person_rows),
+            "Open all in Jira": filter_url,
+        })
+
+    summary_df = pd.DataFrame(summary_rows)
+
+    st.subheader("Overview")
+    chart_df = summary_df.set_index("Responsible")[["Tickets"]]
+    st.bar_chart(chart_df, horizontal=True, height=max(280, min(700, 55 * len(chart_df))))
+
     st.caption(
-        "Comments are added only to checked tickets after confirmation. "
-        "The text stays editable before sending, because bulk comments deserve at least one guardrail."
+        "Select a person in the table to open the ticket list and comment controls. "
+        "The Jira link opens all of that person's tickets in one filter."
     )
 
-    for group_index, (person_name, group_rows) in enumerate(sorted(groups.items(), key=lambda item: item[0].lower())):
-        with st.expander(f"{person_name} · {len(group_rows)} ticket(s)", expanded=True):
-            editor_key = f"{state_key}_editor_{group_index}"
-            edited_df = st.data_editor(
-                pd.DataFrame(group_rows), key=editor_key, hide_index=True,
-                use_container_width=True,
-                disabled=["Key", "Open", "Summary", "Status", "Responsible", "Updated"],
-                column_config={
-                    "Select": st.column_config.CheckboxColumn("Select", default=True),
-                    "Open": st.column_config.LinkColumn("Open", display_text="Open"),
-                    "Summary": st.column_config.TextColumn("Summary", width="large"),
-                    "Updated": st.column_config.DatetimeColumn("Updated", format="DD/MM/YYYY HH:mm"),
-                },
-            )
-            selected_keys = edited_df.loc[edited_df["Select"] == True, "Key"].tolist()
-            default_comment = subtask_config["comment"].format(name=person_name)
-            comment_text = st.text_area(
-                "Comment to add", value=default_comment,
-                key=f"{state_key}_comment_{group_index}", height=90
-            )
-            confirmed = st.checkbox(
-                f"Confirm adding this comment to {len(selected_keys)} selected ticket(s)",
-                key=f"{state_key}_confirm_{group_index}"
-            )
-            if st.button(
-                f"Add comment to selected ({len(selected_keys)})",
-                key=f"{state_key}_send_{group_index}",
-                disabled=not selected_keys or not confirmed or not comment_text.strip(),
-                use_container_width=True,
-            ):
-                results = []
-                progress = st.progress(0)
-                for index, issue_key in enumerate(selected_keys, start=1):
-                    try:
-                        jira_add_comment(
-                            jira_base_url, api_version, auth_type, username, token,
-                            issue_key, comment_text
-                        )
-                        results.append({"Key": issue_key, "Status": "Success", "Details": "Comment added"})
-                    except Exception as error:
-                        results.append({"Key": issue_key, "Status": "Failed", "Details": summarize_exception(error)})
-                    progress.progress(index / len(selected_keys))
+    selected_person = None
+    try:
+        summary_event = st.dataframe(
+            summary_df,
+            key=f"{state_key}_summary",
+            hide_index=True,
+            use_container_width=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            column_config={
+                "Responsible": st.column_config.TextColumn("Responsible", width="medium"),
+                "Tickets": st.column_config.NumberColumn("Tickets", width="small"),
+                "Open all in Jira": st.column_config.LinkColumn(
+                    "Jira filter", display_text="Open tickets"
+                ),
+            },
+        )
+        selected_rows = getattr(getattr(summary_event, "selection", None), "rows", [])
+        if selected_rows:
+            selected_person = summary_df.iloc[selected_rows[0]]["Responsible"]
+    except TypeError:
+        st.dataframe(
+            summary_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Open all in Jira": st.column_config.LinkColumn(
+                    "Jira filter", display_text="Open tickets"
+                ),
+            },
+        )
 
-                result_df = pd.DataFrame(results)
-                success_count = int((result_df["Status"] == "Success").sum())
-                failed_count = len(result_df) - success_count
-                if failed_count:
-                    st.warning(f"Finished: {success_count} succeeded, {failed_count} failed.")
-                else:
-                    st.success(f"Comment added to {success_count} ticket(s).")
-                st.dataframe(result_df, hide_index=True, use_container_width=True)
+    person_options = summary_df["Responsible"].tolist()
+    default_index = person_options.index(selected_person) if selected_person in person_options else 0
+    selected_person = st.selectbox(
+        "Responsible person",
+        person_options,
+        index=default_index,
+        key=f"{state_key}_selected_person",
+        help="Click a row above or choose a person here to manage their tickets.",
+    )
+
+    group_rows = groups[selected_person]
+    selected_summary = next(item for item in summary_rows if item["Responsible"] == selected_person)
+
+    st.divider()
+    header_col, jira_col = st.columns([4, 1])
+    header_col.subheader(f"{selected_person} · {len(group_rows)} ticket(s)")
+    jira_col.link_button(
+        "Open all in Jira",
+        selected_summary["Open all in Jira"],
+        use_container_width=True,
+    )
+
+    editor_key = f"{state_key}_editor_{re.sub(r'[^a-zA-Z0-9]+', '_', selected_person)}"
+    edited_df = st.data_editor(
+        pd.DataFrame(group_rows),
+        key=editor_key,
+        hide_index=True,
+        use_container_width=True,
+        disabled=["Key", "Open", "Summary", "Status", "Responsible", "Updated"],
+        column_config={
+            "Select": st.column_config.CheckboxColumn("Select", default=True),
+            "Open": st.column_config.LinkColumn("Open", display_text="Open"),
+            "Summary": st.column_config.TextColumn("Summary", width="large"),
+            "Updated": st.column_config.DatetimeColumn("Updated", format="DD/MM/YYYY HH:mm"),
+        },
+    )
+    selected_keys = edited_df.loc[edited_df["Select"] == True, "Key"].tolist()
+    default_comment = subtask_config["comment"].format(name=selected_person)
+    comment_text = st.text_area(
+        "Comment to add",
+        value=default_comment,
+        key=f"{state_key}_comment_{re.sub(r'[^a-zA-Z0-9]+', '_', selected_person)}",
+        height=90,
+    )
+    confirmed = st.checkbox(
+        f"Confirm adding this comment to {len(selected_keys)} selected ticket(s)",
+        key=f"{state_key}_confirm_{re.sub(r'[^a-zA-Z0-9]+', '_', selected_person)}",
+    )
+    if st.button(
+        f"Add comment to selected ({len(selected_keys)})",
+        key=f"{state_key}_send_{re.sub(r'[^a-zA-Z0-9]+', '_', selected_person)}",
+        disabled=not selected_keys or not confirmed or not comment_text.strip(),
+        use_container_width=True,
+        type="primary",
+    ):
+        results = []
+        progress = st.progress(0)
+        for index, issue_key in enumerate(selected_keys, start=1):
+            try:
+                jira_add_comment(
+                    jira_base_url, api_version, auth_type, username, token,
+                    issue_key, comment_text
+                )
+                results.append({"Key": issue_key, "Status": "Success", "Details": "Comment added"})
+            except Exception as error:
+                results.append({"Key": issue_key, "Status": "Failed", "Details": summarize_exception(error)})
+            progress.progress(index / len(selected_keys))
+
+        result_df = pd.DataFrame(results)
+        success_count = int((result_df["Status"] == "Success").sum())
+        failed_count = len(result_df) - success_count
+        if failed_count:
+            st.warning(f"Finished: {success_count} succeeded, {failed_count} failed.")
+        else:
+            st.success(f"Comment added to {success_count} ticket(s).")
+        st.dataframe(result_df, hide_index=True, use_container_width=True)
 
 
 # =========================================================
