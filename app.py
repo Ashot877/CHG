@@ -1140,11 +1140,9 @@ def page_weekly_tasks_helper():
         groups[row.get("Responsible") or "Unassigned"].append(row)
 
     total_people = len(groups)
-    largest_group = max((len(items) for items in groups.values()), default=0)
-    metric1, metric2, metric3 = st.columns(3)
+    metric1, metric2 = st.columns(2)
     metric1.metric("Total tickets", len(rows))
     metric2.metric("Responsible people", total_people)
-    metric3.metric("Largest queue", largest_group)
 
     summary_rows = []
     for person_name, person_rows in sorted(
@@ -1159,59 +1157,39 @@ def page_weekly_tasks_helper():
             "Open all in Jira": filter_url,
         })
 
-    summary_df = pd.DataFrame(summary_rows)
+    st.subheader("Choose a responsible person")
+    st.caption("Click a name to open that person's tickets, Jira filter, and comment controls.")
 
-    st.subheader("Overview")
-    chart_df = summary_df.set_index("Responsible")[["Tickets"]]
-    st.bar_chart(chart_df, horizontal=True, height=max(280, min(700, 55 * len(chart_df))))
+    selected_key = f"{state_key}_selected_person"
+    valid_people = [item["Responsible"] for item in summary_rows]
+    if st.session_state.get(selected_key) not in valid_people:
+        st.session_state[selected_key] = None
 
-    st.caption(
-        "Select a person in the table to open the ticket list and comment controls. "
-        "The Jira link opens all of that person's tickets in one filter."
-    )
+    # Compact, clickable people list. Three cards per row keeps the overview readable
+    # without turning the page into a chart nobody asked for.
+    for row_start in range(0, len(summary_rows), 3):
+        columns = st.columns(3)
+        for column, item in zip(columns, summary_rows[row_start:row_start + 3]):
+            person_name = item["Responsible"]
+            ticket_count = item["Tickets"]
+            is_selected = st.session_state.get(selected_key) == person_name
+            label = f"{'✓ ' if is_selected else ''}{person_name} · {ticket_count}"
+            safe_person = re.sub(r"[^a-zA-Z0-9]+", "_", person_name).strip("_")
+            if column.button(
+                label,
+                key=f"{state_key}_person_{safe_person}",
+                use_container_width=True,
+                type="primary" if is_selected else "secondary",
+            ):
+                st.session_state[selected_key] = person_name
+                st.rerun()
 
-    selected_person = None
-    try:
-        summary_event = st.dataframe(
-            summary_df,
-            key=f"{state_key}_summary",
-            hide_index=True,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="single-row",
-            column_config={
-                "Responsible": st.column_config.TextColumn("Responsible", width="medium"),
-                "Tickets": st.column_config.NumberColumn("Tickets", width="small"),
-                "Open all in Jira": st.column_config.LinkColumn(
-                    "Jira filter", display_text="Open tickets"
-                ),
-            },
-        )
-        selected_rows = getattr(getattr(summary_event, "selection", None), "rows", [])
-        if selected_rows:
-            selected_person = summary_df.iloc[selected_rows[0]]["Responsible"]
-    except TypeError:
-        st.dataframe(
-            summary_df,
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "Open all in Jira": st.column_config.LinkColumn(
-                    "Jira filter", display_text="Open tickets"
-                ),
-            },
-        )
+    selected_person = st.session_state.get(selected_key)
+    if not selected_person:
+        st.info("Select a person above to manage their tickets.")
+        return
 
-    person_options = summary_df["Responsible"].tolist()
-    default_index = person_options.index(selected_person) if selected_person in person_options else 0
-    selected_person = st.selectbox(
-        "Responsible person",
-        person_options,
-        index=default_index,
-        key=f"{state_key}_selected_person",
-        help="Click a row above or choose a person here to manage their tickets.",
-    )
-
+    st.divider()
     group_rows = groups[selected_person]
     selected_summary = next(item for item in summary_rows if item["Responsible"] == selected_person)
 
