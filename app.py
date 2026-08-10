@@ -363,75 +363,51 @@ def jira_add_comment(
     body,
     max_retries=3,
 ):
-    """Add INTERNAL Jira Service Management comment."""
+    """Add an INTERNAL Jira Service Management comment via Jira issue API."""
 
     body = (body or "").strip()
-
     if not body:
         raise ValueError("Comment cannot be empty.")
 
-    base_url = clean_base_url(base_url)
-    headers, auth = build_auth(auth_type, username, token)
-
-    url = f"{base_url}/rest/servicedeskapi/request/{issue_key}/comment"
-
     payload = {
         "body": body,
-        "public": False,
+        "properties": [
+            {
+                "key": "sd.public.comment",
+                "value": {
+                    "internal": True
+                },
+            }
+        ],
     }
 
     for attempt in range(max_retries):
-
-        response = requests.post(
-            url,
-            headers=headers,
-            auth=auth,
-            json=payload,
-            timeout=45,
-        )
-
-        # Jira rate limit
-        if response.status_code == 429:
-            retry_after = response.headers.get("Retry-After")
-
-            try:
-                wait_seconds = float(retry_after)
-            except (TypeError, ValueError):
-                wait_seconds = 1.5 * (attempt + 1)
-
-            time.sleep(wait_seconds)
-            continue
-
-        # Temporary Jira errors
-        if response.status_code in (502, 503, 504):
-            time.sleep(1.5 * (attempt + 1))
-            continue
-
-        if response.status_code == 401:
-            raise JiraAuthError(
-                f"Jira returned 401 Unauthorized. "
-                f"User: {username or '-'}"
+        try:
+            return jira_request(
+                "POST",
+                base_url,
+                api_version,
+                auth_type,
+                username,
+                token,
+                f"/issue/{issue_key}/comment",
+                json=payload,
             )
+        except Exception as error:
+            error_text = str(error)
 
-        if not response.ok:
-            raise Exception(
-                f"HTTP {response.status_code}: "
-                f"{response.text[:1200]}"
-            )
+            # Retry only temporary/rate-limit errors.
+            if any(code in error_text for code in ["429:", "502:", "503:", "504:"]):
+                if attempt < max_retries - 1:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
 
-        if response.text.strip():
-            try:
-                return response.json()
-            except Exception:
-                return response.text
-
-        return None
+            raise
 
     raise Exception(
         f"Failed to add internal comment to {issue_key} "
         f"after {max_retries} attempts."
     )
-
 
 def summarize_exception(error, limit=520):
     """Return a short readable Jira error. Keeps the UI calm instead of screaming HTML at people."""
@@ -1306,16 +1282,35 @@ def page_weekly_tasks_helper():
     ):
         results = []
         progress = st.progress(0)
+
+        selected_keys = list(dict.fromkeys(
+            str(key).strip()
+            for key in selected_keys
+            if str(key).strip()
+        ))
+
         for index, issue_key in enumerate(selected_keys, start=1):
             try:
                 jira_add_comment(
                     jira_base_url, api_version, auth_type, username, token,
                     issue_key, comment_text
                 )
-                results.append({"Key": issue_key, "Status": "Success", "Details": "Comment added"})
+                results.append({
+                    "Key": issue_key,
+                    "Status": "Success",
+                    "Details": "Internal comment added",
+                })
             except Exception as error:
-                results.append({"Key": issue_key, "Status": "Failed", "Details": summarize_exception(error)})
+                results.append({
+                    "Key": issue_key,
+                    "Status": "Failed",
+                    "Details": summarize_exception(error),
+                })
+
             progress.progress(index / len(selected_keys))
+
+            if index < len(selected_keys):
+                time.sleep(0.7)
 
         result_df = pd.DataFrame(results)
         success_count = int((result_df["Status"] == "Success").sum())
@@ -1323,7 +1318,7 @@ def page_weekly_tasks_helper():
         if failed_count:
             st.warning(f"Finished: {success_count} succeeded, {failed_count} failed.")
         else:
-            st.success(f"Comment added to {success_count} ticket(s).")
+            st.success(f"Internal comment added to {success_count} ticket(s).")
         st.dataframe(result_df, hide_index=True, use_container_width=True)
 
 
