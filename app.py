@@ -2,6 +2,7 @@ import base64
 import json
 import re
 import zipfile
+import time
 from collections import defaultdict
 from io import BytesIO
 from urllib.parse import quote
@@ -359,51 +360,77 @@ def jira_add_comment(
     username,
     token,
     issue_key,
-    body
+    body,
+    max_retries=3,
 ):
-    """Add an INTERNAL Jira Service Management comment."""
+    """Add INTERNAL Jira Service Management comment."""
 
     body = (body or "").strip()
+
     if not body:
         raise ValueError("Comment cannot be empty.")
 
     base_url = clean_base_url(base_url)
     headers, auth = build_auth(auth_type, username, token)
 
-    url = (
-        f"{base_url}/rest/servicedeskapi/"
-        f"request/{issue_key}/comment"
-    )
+    url = f"{base_url}/rest/servicedeskapi/request/{issue_key}/comment"
 
-    response = requests.post(
-        url,
-        headers=headers,
-        auth=auth,
-        json={
-            "body": body,
-            "public": False,
-        },
-        timeout=45,
-    )
+    payload = {
+        "body": body,
+        "public": False,
+    }
 
-    if response.status_code == 401:
-        raise JiraAuthError(
-            f"Jira returned 401 Unauthorized.\n"
-            f"Username: {username or '-'}\n"
-            f"Endpoint: {url}"
+    for attempt in range(max_retries):
+
+        response = requests.post(
+            url,
+            headers=headers,
+            auth=auth,
+            json=payload,
+            timeout=45,
         )
 
-    if not response.ok:
-        text = response.text or ""
-        raise Exception(f"{response.status_code}: {text[:1200]}")
+        # Jira rate limit
+        if response.status_code == 429:
+            retry_after = response.headers.get("Retry-After")
 
-    if response.text.strip():
-        try:
-            return response.json()
-        except Exception:
-            return response.text
+            try:
+                wait_seconds = float(retry_after)
+            except (TypeError, ValueError):
+                wait_seconds = 1.5 * (attempt + 1)
 
-    return None
+            time.sleep(wait_seconds)
+            continue
+
+        # Temporary Jira errors
+        if response.status_code in (502, 503, 504):
+            time.sleep(1.5 * (attempt + 1))
+            continue
+
+        if response.status_code == 401:
+            raise JiraAuthError(
+                f"Jira returned 401 Unauthorized. "
+                f"User: {username or '-'}"
+            )
+
+        if not response.ok:
+            raise Exception(
+                f"HTTP {response.status_code}: "
+                f"{response.text[:1200]}"
+            )
+
+        if response.text.strip():
+            try:
+                return response.json()
+            except Exception:
+                return response.text
+
+        return None
+
+    raise Exception(
+        f"Failed to add internal comment to {issue_key} "
+        f"after {max_retries} attempts."
+    )
 
 
 def summarize_exception(error, limit=520):
