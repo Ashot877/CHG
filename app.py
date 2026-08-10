@@ -352,16 +352,58 @@ def jira_search(base_url, api_version, auth_type, username, token, jql, fields):
 
 
 
-def jira_add_comment(base_url, api_version, auth_type, username, token, issue_key, body):
-    """Add a plain-text Jira comment to one issue."""
+def jira_add_comment(
+    base_url,
+    api_version,
+    auth_type,
+    username,
+    token,
+    issue_key,
+    body
+):
+    """Add an INTERNAL Jira Service Management comment."""
+
     body = (body or "").strip()
     if not body:
         raise ValueError("Comment cannot be empty.")
 
-    return jira_request(
-        "POST", base_url, api_version, auth_type, username, token,
-        f"/issue/{issue_key}/comment", json={"body": body}
+    base_url = clean_base_url(base_url)
+    headers, auth = build_auth(auth_type, username, token)
+
+    url = (
+        f"{base_url}/rest/servicedeskapi/"
+        f"request/{issue_key}/comment"
     )
+
+    response = requests.post(
+        url,
+        headers=headers,
+        auth=auth,
+        json={
+            "body": body,
+            "public": False,
+        },
+        timeout=45,
+    )
+
+    if response.status_code == 401:
+        raise JiraAuthError(
+            f"Jira returned 401 Unauthorized.\n"
+            f"Username: {username or '-'}\n"
+            f"Endpoint: {url}"
+        )
+
+    if not response.ok:
+        text = response.text or ""
+        raise Exception(f"{response.status_code}: {text[:1200]}")
+
+    if response.text.strip():
+        try:
+            return response.json()
+        except Exception:
+            return response.text
+
+    return None
 
 
 def summarize_exception(error, limit=520):
