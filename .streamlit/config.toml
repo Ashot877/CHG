@@ -1,0 +1,4 @@
+[client]
+# Disable Streamlit's automatic pages navigation before the app renders.
+# This prevents old pages/dashboard.py and pages/settings.py from flashing in the sidebar.
+showSidebarNavigation = false
