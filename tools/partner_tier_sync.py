@@ -715,13 +715,17 @@ def _collapse_entries(entries):
 def partner_match_candidates(value):
     """Return safe lookup candidates from Jira's combined Partner / Project value.
 
+    Jira often renders the field as ``Partner - Project``. A common case is
+    ``Festwin - Festwin`` while the source table contains only ``Festwin`` in
+    Partner and ``-`` in Project name. That repeated pair is safe to collapse.
+
     Examples:
       GrandPashaBet-ALL -> GrandPashaBet
       albatross-Solibet -> Solibet
+      Festwin - Festwin -> Festwin
 
-    We never use fuzzy substring matching. Derived candidates still need an
-    exact/normalized source match, so a random suffix cannot silently choose a
-    Jira value.
+    We never use fuzzy substring matching. Every derived candidate still has to
+    resolve to one unambiguous Partner or Project row in the source file.
     """
     raw = normalize_space(value)
     if not raw:
@@ -729,12 +733,17 @@ def partner_match_candidates(value):
 
     candidates = []
     seen = set()
+    # Include the ordinary hyphen plus common Unicode dashes used by copied Jira
+    # and Confluence text. Humans have apparently invented several characters
+    # for the same tiny horizontal line, so the matcher has to care.
+    separator_re = r"\s*[-‐‑‒–—_/|]\s*"
+    strip_chars = "-‐‑‒–—_/| "
 
     def add(candidate, origin):
-        candidate = normalize_space(candidate).strip("-_/| ")
+        candidate = normalize_space(candidate).strip(strip_chars)
         if not candidate:
             return
-        dedupe = normalize_partner(candidate)
+        dedupe = normalize_partner_loose(candidate)
         if not dedupe or dedupe in seen:
             return
         seen.add(dedupe)
@@ -742,7 +751,18 @@ def partner_match_candidates(value):
 
     add(raw, "Original")
 
-    all_match = re.match(r"^(.*?)(?:\s*[-_/|]\s*|\s+)ALL\s*$", raw, flags=re.IGNORECASE)
+    # Jira can display one logical name twice, e.g. ``Festwin - Festwin``.
+    # Collapse only when both sides normalize to exactly the same value. This is
+    # deterministic and cannot turn GrandPashaBet - Solibet into GrandPashaBet.
+    pair_parts = [normalize_space(part) for part in re.split(separator_re, raw) if normalize_space(part)]
+    if len(pair_parts) == 2 and normalize_partner_loose(pair_parts[0]) == normalize_partner_loose(pair_parts[1]):
+        add(pair_parts[0], "Repeated pair → base")
+
+    all_match = re.match(
+        rf"^(.*?)(?:{separator_re}|\s+)ALL\s*$",
+        raw,
+        flags=re.IGNORECASE,
+    )
     base = raw
     if all_match and normalize_space(all_match.group(1)):
         base = normalize_space(all_match.group(1))
@@ -751,7 +771,7 @@ def partner_match_candidates(value):
     # A Jira value can carry a family/prefix before the actual project, e.g.
     # albatross-Solibet. Try progressively shorter suffixes, but only if they
     # later resolve to a unique Partner or Project source row.
-    parts = [normalize_space(part) for part in re.split(r"\s*[-_/|]\s*", base) if normalize_space(part)]
+    parts = [normalize_space(part) for part in re.split(separator_re, base) if normalize_space(part)]
     if len(parts) > 1:
         for index in range(1, len(parts)):
             add("-".join(parts[index:]), "Suffix")

@@ -32,7 +32,12 @@ PARTNER_FIELD_NAME = str(PARTNER_TYPE_CONFIG.get("partner_field_name", "Partner 
 PARTNER_TYPE_FIELD_NAME = str(PARTNER_TYPE_CONFIG.get("partner_type_field_name", "Partner Type") or "Partner Type")
 PARTNER_COLUMN_NAME = str(PARTNER_TYPE_CONFIG.get("partner_column_name", "Partner") or "Partner")
 PROJECT_COLUMN_NAME = str(PARTNER_TYPE_CONFIG.get("project_column_name", "Project name") or "Project name")
-TYPE_COLUMN_NAME = str(PARTNER_TYPE_CONFIG.get("type_column_name", "Partner Type") or "Partner Type")
+TYPE_COLUMN_NAME = str(
+    PARTNER_TYPE_CONFIG.get("source_type_column_name")
+    or PARTNER_TYPE_CONFIG.get("type_column_name")  # backwards compatibility with older Secrets
+    or "Solution type"
+)
+TYPE_COLUMN_ALIASES = tuple(dict.fromkeys([TYPE_COLUMN_NAME, "Solution type", "Partner Type"]))
 
 DEFAULT_PARTNER_TYPE_JQL = f'''project = "Change Management"
 AND issuetype in (Change)
@@ -54,13 +59,15 @@ def _find_columns(
     project_header=PROJECT_COLUMN_NAME,
 ):
     wanted_partner = normalize_header(partner_header)
-    wanted_type = normalize_header(type_header)
+    wanted_types = {normalize_header(value) for value in TYPE_COLUMN_ALIASES if normalize_header(value)}
+    if type_header:
+        wanted_types.add(normalize_header(type_header))
     wanted_project = normalize_header(project_header)
 
     for row_index, row in enumerate(matrix[:20]):
         headers = [normalize_header(cell) for cell in row]
         partner_indexes = [i for i, value in enumerate(headers) if value == wanted_partner]
-        type_indexes = [i for i, value in enumerate(headers) if value == wanted_type]
+        type_indexes = [i for i, value in enumerate(headers) if value in wanted_types]
         if partner_indexes and type_indexes:
             project_indexes = [i for i, value in enumerate(headers) if value == wanted_project]
             return row_index, partner_indexes[0], type_indexes[0], (project_indexes[0] if project_indexes else None)
@@ -119,7 +126,7 @@ def parse_partner_type_rows_from_docx(
 
     if not best_rows:
         raise ValueError(
-            f'Could not find a Word table with "{partner_header}" and "{type_header}" columns.'
+            f'Could not find a Word table with "{partner_header}" and "Solution type" columns.'
         )
     return best_rows
 
@@ -143,7 +150,7 @@ def parse_partner_type_rows_from_doc(
 
     if not best_rows:
         raise ValueError(
-            f'Could not find a Word table with "{partner_header}" and "{type_header}" columns.'
+            f'Could not find a Word table with "{partner_header}" and "Solution type" columns.'
         )
     return best_rows
 
@@ -171,7 +178,7 @@ def parse_partner_type_rows_from_excel(
 
     if not best_rows:
         raise ValueError(
-            f'Could not find an Excel sheet with "{partner_header}" and "{type_header}" columns.'
+            f'Could not find an Excel sheet with "{partner_header}" and "Solution type" columns.'
         )
     return best_rows, best_sheet
 
@@ -200,7 +207,7 @@ def parse_partner_type_rows_from_csv(
             last_error = error
 
     raise ValueError(
-        f'Could not find CSV columns "{partner_header}" and "{type_header}".'
+        f'Could not find CSV columns "{partner_header}" and "Solution type".'
         + (f" Details: {last_error}" if last_error else "")
     )
 
@@ -296,9 +303,9 @@ def _resolve_partner_type_match(entries, source_kind, match_name):
 
     entry, state = _collapse_entries(entries)
     if state == "conflict":
-        return None, f"Conflicting Partner Type values for matched {source_kind.lower()}", match_name
+        return None, f"Conflicting Solution type values for matched {source_kind.lower()}", match_name
     if state == "missing_type":
-        return None, "Partner Type is empty in the source file", match_name
+        return None, "Solution type is empty in the source file", match_name
     return entry, "", match_name
 
 
@@ -500,7 +507,7 @@ def render_partner_type_maintenance():
         """<div class="feature-panel">
         <div class="step-kicker">Data maintenance · Partner master data</div>
         <div class="feature-title">Partner Type Sync</div>
-        <div class="feature-text">Use the same weekly Word export. The helper finds each partner, reads Partner Type, blocks missing or conflicting values, and updates Jira only after preview and confirmation.</div>
+        <div class="feature-text">Use the same weekly Word export. The helper finds each partner/project, reads <strong>Solution type</strong> from the source, and writes it to Jira <strong>Partner Type</strong> only after preview and confirmation.</div>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -516,7 +523,7 @@ def render_partner_type_maintenance():
         )
     with step2:
         st.markdown(
-            """<div class="mini-card"><div class="step-kicker">Step 02</div><div class="tool-card-title">Match Partner Type</div><div class="tool-card-text">Partner names are normalized, but ambiguous matches are never guessed.</div></div>""",
+            """<div class="mini-card"><div class="step-kicker">Step 02</div><div class="tool-card-title">Match Solution type</div><div class="tool-card-text">Reads Solution type from the source and maps it to Jira Partner Type. Ambiguous matches are never guessed.</div></div>""",
             unsafe_allow_html=True,
         )
     with step3:
@@ -529,7 +536,7 @@ def render_partner_type_maintenance():
     source_col, action_col = st.columns([4.2, 1.1])
     with source_col:
         st.markdown("### Source file")
-        st.caption(f'The file must contain columns **{PARTNER_COLUMN_NAME}** and **{TYPE_COLUMN_NAME}**.')
+        st.caption(f'The file must contain **{PARTNER_COLUMN_NAME}**, **{PROJECT_COLUMN_NAME}** (when available), and **Solution type**. The Solution type value will be written to Jira **{PARTNER_TYPE_FIELD_NAME}**.')
         uploaded_file = st.file_uploader(
             "Partner Information file",
             type=["doc", "docx", "xlsx", "xlsm", "csv"],
@@ -557,7 +564,7 @@ def render_partner_type_maintenance():
     c1, c2, c3 = st.columns([1.2, 1.2, 3])
     preview_clicked = c1.button("Preview sync", type="primary", use_container_width=True, key="partner_type_preview")
     c2.caption("Preview never changes Jira.")
-    c3.caption("Missing Partner Type, partner mismatches, and conflicting source rows are blocked.")
+    c3.caption("Missing Solution type, partner/project mismatches, and conflicting source rows are blocked.")
 
     if clear_clicked:
         _clear_partner_type_state()
@@ -575,7 +582,7 @@ def render_partner_type_maintenance():
             return
 
         try:
-            with st.spinner("Reading Partner Type from the source and building a safe Jira preview..."):
+            with st.spinner("Reading Solution type from the source and building a safe Jira Partner Type preview..."):
                 rows, source_title = load_partner_type_rows_from_upload(uploaded_file)
                 lookup = build_partner_type_lookup(rows)
 
