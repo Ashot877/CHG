@@ -29,12 +29,19 @@ The helper:
 
 1. Finds Jira tickets where `Partner tier` is empty.
 2. Reads `Partner` + `Partner Category` from the weekly Partner Information export.
-3. Matches the Jira `Partner / Project` safely.
+3. Matches the Jira `Partner / Project` against **both** source columns: `Partner` and `Project name`.
 4. Extracts the numeric tier from values such as `Group 4`, `Group 4(New)`, `GROUP 4`, or ` group   4 `.
 5. Shows `Ready to update` and `Blocked / needs manual check` before any Jira write.
 6. Updates only selected rows after explicit confirmation.
 
-It never guesses when the partner is missing, ambiguous, duplicated with conflicting values, or the category does not contain one clear tier number.
+It never guesses when the partner/project is missing, ambiguous, duplicated with conflicting values, or the category does not contain one clear tier number.
+
+Matching rules are intentionally conservative:
+
+- `Solibet` can match `Project name = Solibet` even when its parent `Partner = GrandPashaBet`.
+- `albatross-Solibet` can safely fall back to the `Solibet` suffix, but only when that suffix resolves uniquely in `Partner` or `Project name`.
+- `GrandPashaBet-ALL` first becomes `GrandPashaBet`. If a same-named project exists, that exact project row is preferred. Otherwise Partner Tier may use the parent partner only when all matching source rows resolve to the same tier.
+- Duplicate project names under different parent partners are blocked instead of guessed.
 
 ### Partner Type Sync
 
@@ -43,10 +50,12 @@ The second maintenance tool uses the same Partner Information export but reads t
 It:
 
 1. Finds Jira tickets where `Partner Type` is empty.
-2. Matches by `Partner / Project` using the same safe exact/normalized logic.
+2. Matches by `Partner / Project` against both `Partner` and `Project name`, using the same safe exact/normalized/prefix-suffix logic.
 3. Blocks missing, ambiguous, or conflicting source values.
 4. Shows the proposed `New Partner Type` before writing anything.
 5. Uses Jira edit metadata where available so select-option fields can be updated correctly.
+
+For Partner Type, project-level data wins over parent-level data. This matters for partner families such as GrandPashaBet where different projects can have different types. For an `-ALL` value, a same-named project is used when present; otherwise mixed child types remain blocked.
 
 ## Supported source files
 
