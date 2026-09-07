@@ -12,6 +12,7 @@ APP_CONFIG = dict(SECRETS.get("app", {})) if SECRETS.get("app") else {}
 JIRA_CONFIG = dict(SECRETS.get("jira", {})) if SECRETS.get("jira") else {}
 MANUAL_FIELDS_CONFIG = dict(SECRETS.get("manual_field_ids", {})) if SECRETS.get("manual_field_ids") else {}
 PARTNER_TIER_CONFIG = dict(SECRETS.get("partner_tier", {})) if SECRETS.get("partner_tier") else {}
+PARTNER_TYPE_CONFIG = dict(SECRETS.get("partner_type", {})) if SECRETS.get("partner_type") else {}
 
 JIRA_BASE_URL = APP_CONFIG.get("jira_base_url") or JIRA_CONFIG.get("base_url", "https://jirasd.digitain.com")
 API_VERSION = str(JIRA_CONFIG.get("api_version", "2"))
