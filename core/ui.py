@@ -16,69 +16,76 @@ NAV_ITEMS = {
 
 
 def render_login():
-    st.markdown(
-        f"""
-        <div class="login-shell">
-          <div class="login-card">
-            <div class="login-brand">Digitain · Change Management</div>
-            <div class="login-title">{escape(APP_TITLE)}</div>
-            <div class="login-subtitle">{escape(APP_SUBTITLE)}<br>Secure internal access with Jira verification.</div>
-            <div class="login-rule"></div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
     left, center, right = st.columns([1.15, 1, 1.15])
     with center:
-        entered_password = st.text_input(
-            "Password",
-            type="password",
-            label_visibility="collapsed",
-            placeholder="Enter access password",
-        )
-        login_clicked = st.button("Enter workspace", type="primary", use_container_width=True)
+        with st.form("login_form", clear_on_submit=False, border=False):
+            st.markdown(
+                f"""
+                <div class="login-header">
+                    <div class="login-mark">CH</div>
+                    <div class="login-eyebrow">Internal workspace</div>
+                    <div class="login-title">{escape(APP_TITLE)}</div>
+                    <div class="login-subtitle">{escape(APP_SUBTITLE)}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-        if not APP_USERS:
-            st.warning("No users are configured in `.streamlit/secrets.toml`.")
+            entered_password = st.text_input(
+                "Access password",
+                type="password",
+                placeholder="Enter password",
+                help="Your Jira access is verified after sign-in.",
+            )
+            login_clicked = st.form_submit_button(
+                "Continue",
+                type="primary",
+                use_container_width=True,
+            )
+            st.markdown(
+                '<div class="login-note">Jira access is checked securely after sign-in.</div>',
+                unsafe_allow_html=True,
+            )
 
-        if login_clicked:
-            entered_password_clean = (entered_password or "").strip()
-            user_config = APP_USERS.get(entered_password_clean)
+            if not APP_USERS:
+                st.warning("No users are configured in `.streamlit/secrets.toml`.")
 
-            if not user_config:
-                st.session_state.logged_in = False
-                st.session_state.current_user = None
-                st.session_state.jira_me = None
-                st.error("Wrong password.")
-                st.stop()
+            if login_clicked:
+                entered_password_clean = (entered_password or "").strip()
+                user_config = APP_USERS.get(entered_password_clean)
 
-            token = (user_config.get("jira_token") or "").strip()
-            auth_type = user_config.get("jira_auth_type", AUTH_TYPE)
-            username = user_config.get("jira_username", "")
-
-            if VERIFY_JIRA_ON_LOGIN and token and "PASTE_" not in token:
-                try:
-                    with st.spinner("Verifying Jira access..."):
-                        me = jira_get_myself(JIRA_BASE_URL, API_VERSION, auth_type, username, token)
-                    st.session_state.jira_me = me
-                except Exception as e:
+                if not user_config:
                     st.session_state.logged_in = False
                     st.session_state.current_user = None
                     st.session_state.jira_me = None
-                    st.error("Password is correct, but Jira API connection failed.")
-                    st.code(str(e))
+                    st.error("Wrong password.")
                     st.stop()
 
-            st.session_state.logged_in = True
-            st.session_state.current_user = user_config
-            st.rerun()
+                token = (user_config.get("jira_token") or "").strip()
+                auth_type = user_config.get("jira_auth_type", AUTH_TYPE)
+                username = user_config.get("jira_username", "")
+
+                if VERIFY_JIRA_ON_LOGIN and token and "PASTE_" not in token:
+                    try:
+                        with st.spinner("Verifying Jira access..."):
+                            me = jira_get_myself(JIRA_BASE_URL, API_VERSION, auth_type, username, token)
+                        st.session_state.jira_me = me
+                    except Exception as e:
+                        st.session_state.logged_in = False
+                        st.session_state.current_user = None
+                        st.session_state.jira_me = None
+                        st.error("Password is correct, but Jira API connection failed.")
+                        st.code(str(e))
+                        st.stop()
+
+                st.session_state.logged_in = True
+                st.session_state.current_user = user_config
+                st.rerun()
 
     st.stop()
 
 
-def render_hero(title, subtitle, pills=None, eyebrow="Change Management · Internal Workspace"):
+def render_hero(title, subtitle, pills=None, eyebrow="Change Operations"):
     pills = pills or []
     pill_html = "".join([f'<span class="pill">{escape(str(pill))}</span>' for pill in pills])
     st.markdown(
@@ -110,8 +117,8 @@ def sidebar_nav():
           <div class="brand-row">
             <div class="brand-mark">CH</div>
             <div>
-              <div class="brand-title">CHANGE OPS</div>
-              <div class="brand-subtitle">Digitain · Internal</div>
+              <div class="brand-title">Change Helper</div>
+              <div class="brand-subtitle">Change Management</div>
             </div>
           </div>
         </div>
@@ -138,8 +145,8 @@ def sidebar_nav():
         key="main_navigation",
     )
 
-    st.sidebar.divider()
-    if st.sidebar.button("Log out", use_container_width=True):
+    st.sidebar.markdown('<div class="logout-separator"></div>', unsafe_allow_html=True)
+    if st.sidebar.button("Log out", use_container_width=True, key="logout_button"):
         st.session_state.logged_in = False
         st.session_state.current_user = None
         st.session_state.jira_me = None
@@ -147,7 +154,7 @@ def sidebar_nav():
         st.rerun()
 
     st.sidebar.markdown(
-        '<div class="sidebar-footer">CHANGE HELPER · Internal operations workspace<br>Jira writes remain behind preview and confirmation.</div>',
+        '<div class="sidebar-footer">Change Helper<br><span>Safe updates with preview and confirmation.</span></div>',
         unsafe_allow_html=True,
     )
     return NAV_ITEMS[selected_label]
