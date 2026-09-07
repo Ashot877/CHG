@@ -45,21 +45,21 @@ Matching rules are intentionally conservative:
 
 ### Partner Type Sync
 
-The second maintenance tool uses the same Partner Information export but reads the `Partner Type` column.
+The second maintenance tool uses the same Partner Information export, reads the source column `Solution type`, and writes that value to the Jira field `Partner Type`.
 
 It:
 
 1. Finds Jira tickets where `Partner Type` is empty.
 2. Matches by `Partner / Project` against both `Partner` and `Project name`, using the same safe exact/normalized/prefix-suffix logic.
-3. Blocks missing, ambiguous, or conflicting source values.
+3. Reads `Solution type` from the matched source row and blocks missing, ambiguous, or conflicting source values.
 4. Shows the proposed `New Partner Type` before writing anything.
 5. Uses Jira edit metadata where available so select-option fields can be updated correctly.
 
-For Partner Type, project-level data wins over parent-level data. This matters for partner families such as GrandPashaBet where different projects can have different types. For an `-ALL` value, a same-named project is used when present; otherwise mixed child types remain blocked.
+For Jira Partner Type, `Solution type` from the project-level source row wins over parent-level data. This matters for partner families such as GrandPashaBet where different projects can have different types. For an `-ALL` value, a same-named project is used when present; otherwise mixed child types remain blocked.
 
 ## Supported source files
 
-Both Partner Tier and Partner Type accept:
+Both Partner Tier and Partner Type Sync accept:
 
 - `.doc` — including the Word-compatible HTML/MHTML format commonly produced by Confluence Export to Word
 - `.docx`
@@ -85,3 +85,9 @@ For a clean repository, delete old `pages/dashboard.py` and `pages/settings.py` 
 ## Secrets
 
 Keep the real `.streamlit/secrets.toml` outside Git. The included `.streamlit/secrets.example.toml` only documents optional configuration keys.
+
+## v5 matching fix
+
+- Jira values rendered as `Partner - Project` now handle repeated pairs safely, e.g. `Festwin - Festwin` -> `Festwin`.
+- Common Unicode dash characters are treated as separators as well.
+- The rule is deterministic: only two identical normalized sides are collapsed, so `GrandPashaBet - Solibet` is not reduced to the parent partner.
