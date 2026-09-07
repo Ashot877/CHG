@@ -49,6 +49,8 @@ class _HTMLTableParser(HTMLParser):
         self._row = None
         self._cell = None
         self._cell_is_header = False
+        self._cell_rowspan = 1
+        self._cell_colspan = 1
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
@@ -61,6 +63,15 @@ class _HTMLTableParser(HTMLParser):
         elif self._table_depth == 1 and tag in ("td", "th"):
             self._cell = []
             self._cell_is_header = tag == "th"
+            attrs = dict(attrs or [])
+            try:
+                self._cell_rowspan = max(1, int(attrs.get("rowspan", 1) or 1))
+            except (TypeError, ValueError):
+                self._cell_rowspan = 1
+            try:
+                self._cell_colspan = max(1, int(attrs.get("colspan", 1) or 1))
+            except (TypeError, ValueError):
+                self._cell_colspan = 1
         elif self._table_depth == 1 and tag == "br" and self._cell is not None:
             self._cell.append(" ")
 
@@ -73,8 +84,15 @@ class _HTMLTableParser(HTMLParser):
         if self._table_depth == 1 and tag in ("td", "th") and self._cell is not None:
             text = " ".join("".join(self._cell).replace("\xa0", " ").split())
             if self._row is not None:
-                self._row.append({"text": text, "header": self._cell_is_header})
+                self._row.append({
+                    "text": text,
+                    "header": self._cell_is_header,
+                    "rowspan": self._cell_rowspan,
+                    "colspan": self._cell_colspan,
+                })
             self._cell = None
+            self._cell_rowspan = 1
+            self._cell_colspan = 1
         elif self._table_depth == 1 and tag == "tr":
             if self._row is not None and any(cell.get("text") for cell in self._row):
                 self._rows.append(self._row)
@@ -127,25 +145,82 @@ def extract_tier_from_category(category):
     return None, f'Ambiguous Partner Category contains several numbers: "{text}"'
 
 
+def _expand_html_table(rows):
+    """Expand HTML rowspan/colspan cells into a rectangular logical table.
+
+    Confluence Word exports commonly use a vertically merged Partner cell.
+    Without expanding rowspan, project rows slide one column to the left and
+    the parser starts treating a project as a partner. Corporate HTML doing
+    corporate HTML things, basically.
+    """
+    expanded = []
+    active_spans = {}
+
+    for raw_row in rows:
+        logical = {}
+        next_active = {}
+
+        # Carry values from cells that started on a previous row.
+        for col, (remaining, cell) in active_spans.items():
+            if remaining <= 0:
+                continue
+            logical[col] = dict(cell)
+            if remaining - 1 > 0:
+                next_active[col] = (remaining - 1, cell)
+
+        col = 0
+        for raw_cell in raw_row:
+            while col in logical:
+                col += 1
+
+            cell = {
+                "text": normalize_space(raw_cell.get("text")),
+                "header": bool(raw_cell.get("header")),
+            }
+            rowspan = max(1, int(raw_cell.get("rowspan", 1) or 1))
+            colspan = max(1, int(raw_cell.get("colspan", 1) or 1))
+
+            for offset in range(colspan):
+                target_col = col + offset
+                while target_col in logical:
+                    target_col += 1
+                logical[target_col] = dict(cell)
+                if rowspan > 1:
+                    next_active[target_col] = (rowspan - 1, cell)
+            col += colspan
+
+        if logical:
+            max_col = max(logical)
+            expanded.append([
+                logical.get(i, {"text": "", "header": False})
+                for i in range(max_col + 1)
+            ])
+        active_spans = next_active
+
+    return expanded
+
+
 def _parse_html_tables(html):
     parser = _HTMLTableParser()
     parser.feed(html or "")
-    return parser.tables
+    return [_expand_html_table(table) for table in parser.tables]
 
 
 def _row_texts(row):
     return [normalize_space(cell.get("text")) for cell in row]
 
 
-def _find_named_columns(rows, partner_header, category_header):
+def _find_named_columns(rows, partner_header, category_header, project_header="Project name"):
     wanted_partner = normalize_header(partner_header)
     wanted_category = normalize_header(category_header)
+    wanted_project = normalize_header(project_header)
     for row_index, row in enumerate(rows[:15]):
         headers = [normalize_header(cell.get("text")) for cell in row]
         partner_indexes = [i for i, h in enumerate(headers) if h == wanted_partner]
         category_indexes = [i for i, h in enumerate(headers) if h == wanted_category]
         if partner_indexes and category_indexes:
-            return row_index, partner_indexes[0], category_indexes[0]
+            project_indexes = [i for i, h in enumerate(headers) if h == wanted_project]
+            return row_index, partner_indexes[0], category_indexes[0], (project_indexes[0] if project_indexes else None)
     return None
 
 
@@ -170,23 +245,38 @@ def _find_group_column_heuristic(rows):
     return candidates[0][1]
 
 
-def parse_partner_rows_from_html(html, partner_header="Partner", category_header="Partner Category"):
+def parse_partner_rows_from_html(
+    html,
+    partner_header="Partner",
+    category_header="Partner Category",
+    project_header="Project name",
+):
     tables = _parse_html_tables(html)
     best_rows = []
     best_score = -1
 
     for rows in tables:
-        named = _find_named_columns(rows, partner_header, category_header)
+        named = _find_named_columns(rows, partner_header, category_header, project_header)
         parsed = []
         score = 0
         if named:
-            header_row, partner_col, category_col = named
+            header_row, partner_col, category_col, project_col = named
+            current_partner = ""
             for row in rows[header_row + 1:]:
                 texts = _row_texts(row)
                 partner = texts[partner_col] if partner_col < len(texts) else ""
+                if partner:
+                    current_partner = partner
+                else:
+                    partner = current_partner
+                project = texts[project_col] if project_col is not None and project_col < len(texts) else ""
                 category = texts[category_col] if category_col < len(texts) else ""
-                if partner or category:
-                    parsed.append({"Partner": partner, "Partner Category": category})
+                if partner or project or category:
+                    parsed.append({
+                        "Partner": partner,
+                        "Project name": project,
+                        "Partner Category": category,
+                    })
             score = 1000 + len(parsed)
         else:
             category_col = _find_group_column_heuristic(rows)
@@ -196,7 +286,7 @@ def parse_partner_rows_from_html(html, partner_header="Partner", category_header
                     partner = texts[0] if texts else ""
                     category = texts[category_col] if category_col < len(texts) else ""
                     if partner and extract_tier_from_category(category)[0] is not None:
-                        parsed.append({"Partner": partner, "Partner Category": category})
+                        parsed.append({"Partner": partner, "Project name": "", "Partner Category": category})
                 score = len(parsed)
 
         if parsed and score > best_score:
@@ -295,6 +385,7 @@ def load_confluence_partner_rows(page_url, jira_auth=None):
                         html,
                         PARTNER_TIER_CONFIG.get("partner_column_name", "Partner"),
                         PARTNER_TIER_CONFIG.get("category_column_name", "Partner Category"),
+                        PARTNER_TIER_CONFIG.get("project_column_name", "Project name"),
                     )
                     return rows, title
             except Exception as error:
@@ -307,6 +398,7 @@ def load_confluence_partner_rows(page_url, jira_auth=None):
                 response.text,
                 PARTNER_TIER_CONFIG.get("partner_column_name", "Partner"),
                 PARTNER_TIER_CONFIG.get("category_column_name", "Partner Category"),
+                PARTNER_TIER_CONFIG.get("project_column_name", "Project name"),
             )
             return rows, "Confluence page"
         errors.append(f"{response.status_code} from page URL")
@@ -320,8 +412,13 @@ def load_confluence_partner_rows(page_url, jira_auth=None):
     )
 
 
-def _rows_from_matrix(matrix, partner_header="Partner", category_header="Partner Category"):
-    """Extract Partner/Partner Category rows from a rectangular text matrix."""
+def _rows_from_matrix(
+    matrix,
+    partner_header="Partner",
+    category_header="Partner Category",
+    project_header="Project name",
+):
+    """Extract Partner/Project/Partner Category rows from a rectangular text matrix."""
     rows = [
         [{"text": normalize_space(cell), "header": False} for cell in row]
         for row in matrix
@@ -330,27 +427,42 @@ def _rows_from_matrix(matrix, partner_header="Partner", category_header="Partner
     if not rows:
         return []
 
-    named = _find_named_columns(rows, partner_header, category_header)
+    named = _find_named_columns(rows, partner_header, category_header, project_header)
     if not named:
         return []
 
-    header_row, partner_col, category_col = named
+    header_row, partner_col, category_col, project_col = named
     parsed = []
+    current_partner = ""
     for row in rows[header_row + 1:]:
         texts = _row_texts(row)
         partner = texts[partner_col] if partner_col < len(texts) else ""
+        if partner:
+            current_partner = partner
+        else:
+            partner = current_partner
+        project = texts[project_col] if project_col is not None and project_col < len(texts) else ""
         category = texts[category_col] if category_col < len(texts) else ""
-        if partner or category:
-            parsed.append({"Partner": partner, "Partner Category": category})
+        if partner or project or category:
+            parsed.append({
+                "Partner": partner,
+                "Project name": project,
+                "Partner Category": category,
+            })
     return parsed
 
 
-def parse_partner_rows_from_docx(data, partner_header="Partner", category_header="Partner Category"):
+def parse_partner_rows_from_docx(
+    data,
+    partner_header="Partner",
+    category_header="Partner Category",
+    project_header="Project name",
+):
     document = Document(BytesIO(data))
     best_rows = []
     for table in document.tables:
         matrix = [[cell.text for cell in row.cells] for row in table.rows]
-        parsed = _rows_from_matrix(matrix, partner_header, category_header)
+        parsed = _rows_from_matrix(matrix, partner_header, category_header, project_header)
         if len(parsed) > len(best_rows):
             best_rows = parsed
 
@@ -491,14 +603,19 @@ def extract_legacy_word_table_matrices(data):
     )
 
 
-def parse_partner_rows_from_doc(data, partner_header="Partner", category_header="Partner Category"):
+def parse_partner_rows_from_doc(
+    data,
+    partner_header="Partner",
+    category_header="Partner Category",
+    project_header="Project name",
+):
     # Some exports use a .doc name for OOXML bytes. Content detection is safer than trusting the extension.
     if is_docx_bytes(data):
-        return parse_partner_rows_from_docx(data, partner_header, category_header)
+        return parse_partner_rows_from_docx(data, partner_header, category_header, project_header)
 
     best_rows = []
     for matrix in extract_legacy_word_table_matrices(data):
-        parsed = _rows_from_matrix(matrix, partner_header, category_header)
+        parsed = _rows_from_matrix(matrix, partner_header, category_header, project_header)
         if len(parsed) > len(best_rows):
             best_rows = parsed
 
@@ -513,13 +630,18 @@ def _dataframe_matrix(df):
     return [["" if pd.isna(value) else str(value) for value in row] for row in df.values.tolist()]
 
 
-def parse_partner_rows_from_excel(data, partner_header="Partner", category_header="Partner Category"):
+def parse_partner_rows_from_excel(
+    data,
+    partner_header="Partner",
+    category_header="Partner Category",
+    project_header="Project name",
+):
     book = pd.ExcelFile(BytesIO(data))
     best_rows = []
     best_sheet = ""
     for sheet_name in book.sheet_names:
         df = pd.read_excel(book, sheet_name=sheet_name, header=None, dtype=object)
-        parsed = _rows_from_matrix(_dataframe_matrix(df), partner_header, category_header)
+        parsed = _rows_from_matrix(_dataframe_matrix(df), partner_header, category_header, project_header)
         if len(parsed) > len(best_rows):
             best_rows = parsed
             best_sheet = str(sheet_name)
@@ -531,12 +653,17 @@ def parse_partner_rows_from_excel(data, partner_header="Partner", category_heade
     return best_rows, best_sheet
 
 
-def parse_partner_rows_from_csv(data, partner_header="Partner", category_header="Partner Category"):
+def parse_partner_rows_from_csv(
+    data,
+    partner_header="Partner",
+    category_header="Partner Category",
+    project_header="Project name",
+):
     last_error = None
     for encoding in ("utf-8-sig", "utf-8", "cp1252"):
         try:
             df = pd.read_csv(BytesIO(data), header=None, dtype=object, sep=None, engine="python", encoding=encoding)
-            parsed = _rows_from_matrix(_dataframe_matrix(df), partner_header, category_header)
+            parsed = _rows_from_matrix(_dataframe_matrix(df), partner_header, category_header, project_header)
             if parsed:
                 return parsed
         except Exception as error:
@@ -555,20 +682,21 @@ def load_partner_rows_from_upload(uploaded_file):
     suffix = name.lower().rsplit(".", 1)[-1] if "." in name else ""
     data = uploaded_file.getvalue()
     partner_header = str(PARTNER_TIER_CONFIG.get("partner_column_name", "Partner") or "Partner")
+    project_header = str(PARTNER_TIER_CONFIG.get("project_column_name", "Project name") or "Project name")
     category_header = str(PARTNER_TIER_CONFIG.get("category_column_name", "Partner Category") or "Partner Category")
 
     if suffix == "doc":
-        rows = parse_partner_rows_from_doc(data, partner_header, category_header)
+        rows = parse_partner_rows_from_doc(data, partner_header, category_header, project_header)
         return rows, f"{name} · Confluence Word export"
     if suffix == "docx":
-        rows = parse_partner_rows_from_docx(data, partner_header, category_header)
+        rows = parse_partner_rows_from_docx(data, partner_header, category_header, project_header)
         return rows, f"{name} · Word export"
     if suffix in ("xlsx", "xlsm"):
-        rows, sheet = parse_partner_rows_from_excel(data, partner_header, category_header)
+        rows, sheet = parse_partner_rows_from_excel(data, partner_header, category_header, project_header)
         title = f"{name} · sheet: {sheet}" if sheet else name
         return rows, title
     if suffix == "csv":
-        rows = parse_partner_rows_from_csv(data, partner_header, category_header)
+        rows = parse_partner_rows_from_csv(data, partner_header, category_header, project_header)
         return rows, name
 
     raise ValueError("Unsupported source file. Upload .doc, .docx, .xlsx, .xlsm, or .csv.")
@@ -584,28 +712,111 @@ def _collapse_entries(entries):
     return valid[0], "ok"
 
 
+def partner_match_candidates(value):
+    """Return safe lookup candidates from Jira's combined Partner / Project value.
+
+    Examples:
+      GrandPashaBet-ALL -> GrandPashaBet
+      albatross-Solibet -> Solibet
+
+    We never use fuzzy substring matching. Derived candidates still need an
+    exact/normalized source match, so a random suffix cannot silently choose a
+    Jira value.
+    """
+    raw = normalize_space(value)
+    if not raw:
+        return []
+
+    candidates = []
+    seen = set()
+
+    def add(candidate, origin):
+        candidate = normalize_space(candidate).strip("-_/| ")
+        if not candidate:
+            return
+        dedupe = normalize_partner(candidate)
+        if not dedupe or dedupe in seen:
+            return
+        seen.add(dedupe)
+        candidates.append((candidate, origin))
+
+    add(raw, "Original")
+
+    all_match = re.match(r"^(.*?)(?:\s*[-_/|]\s*|\s+)ALL\s*$", raw, flags=re.IGNORECASE)
+    base = raw
+    if all_match and normalize_space(all_match.group(1)):
+        base = normalize_space(all_match.group(1))
+        add(base, "ALL → base")
+
+    # A Jira value can carry a family/prefix before the actual project, e.g.
+    # albatross-Solibet. Try progressively shorter suffixes, but only if they
+    # later resolve to a unique Partner or Project source row.
+    parts = [normalize_space(part) for part in re.split(r"\s*[-_/|]\s*", base) if normalize_space(part)]
+    if len(parts) > 1:
+        for index in range(1, len(parts)):
+            add("-".join(parts[index:]), "Suffix")
+
+    return candidates
+
+
 def build_partner_lookup(rows):
-    exact = defaultdict(list)
-    loose = defaultdict(list)
+    partner_exact = defaultdict(list)
+    partner_loose = defaultdict(list)
+    project_exact = defaultdict(list)
+    project_loose = defaultdict(list)
     prepared = []
 
     for row in rows:
         partner = normalize_space(row.get("Partner"))
+        project = normalize_space(row.get("Project name"))
         category = normalize_space(row.get("Partner Category"))
-        if not partner:
+        if not partner and not project:
             continue
         tier, category_error = extract_tier_from_category(category)
         entry = {
             "partner": partner,
+            "project": project,
             "category": category,
             "tier": tier,
             "category_error": category_error,
         }
         prepared.append(entry)
-        exact[normalize_partner(partner)].append(entry)
-        loose[normalize_partner_loose(partner)].append(entry)
+        if partner:
+            partner_exact[normalize_partner(partner)].append(entry)
+            partner_loose[normalize_partner_loose(partner)].append(entry)
+        if project and project not in {"-", "—", "–"}:
+            project_exact[normalize_partner(project)].append(entry)
+            project_loose[normalize_partner_loose(project)].append(entry)
 
-    return {"exact": exact, "loose": loose, "rows": prepared}
+    return {
+        "partner_exact": partner_exact,
+        "partner_loose": partner_loose,
+        "project_exact": project_exact,
+        "project_loose": project_loose,
+        "rows": prepared,
+    }
+
+
+def _resolve_tier_match(entries, source_kind, match_name):
+    if not entries:
+        return None, "", match_name
+
+    if source_kind == "Project":
+        parent_partners = {normalize_partner(entry.get("partner")) for entry in entries if entry.get("partner")}
+        if len(parent_partners) > 1:
+            return None, "Project name match is ambiguous across multiple partners", match_name
+    else:
+        source_partners = {normalize_partner(entry.get("partner")) for entry in entries if entry.get("partner")}
+        if len(source_partners) > 1:
+            return None, "Partner match is ambiguous in the source file", match_name
+
+    entry, state = _collapse_entries(entries)
+    if state == "conflict":
+        return None, f"Conflicting Partner Category values for matched {source_kind.lower()}", match_name
+    if state == "missing_category":
+        first = entries[0]
+        return None, first.get("category_error") or "Partner Category is empty", match_name
+    return entry, "", match_name
 
 
 def match_partner(lookup, partner_value):
@@ -613,31 +824,30 @@ def match_partner(lookup, partner_value):
     if not partner_value:
         return None, "Partner / Project is empty", ""
 
-    exact_entries = lookup["exact"].get(normalize_partner(partner_value), [])
-    if exact_entries:
-        entry, state = _collapse_entries(exact_entries)
-        if state == "conflict":
-            return None, "Conflicting source rows for this partner", "Exact"
-        if state == "missing_category":
-            entry = exact_entries[0]
-            return None, entry.get("category_error") or "Partner Category is empty", "Exact"
-        return entry, "", "Exact"
+    found_errors = []
+    for candidate, origin in partner_match_candidates(partner_value):
+        exact_key = normalize_partner(candidate)
+        loose_key = normalize_partner_loose(candidate)
+        origin_suffix = "" if origin == "Original" else f" · {origin}"
 
-    loose_key = normalize_partner_loose(partner_value)
-    loose_entries = lookup["loose"].get(loose_key, [])
-    if loose_entries:
-        unique_source_names = {normalize_partner(e.get("partner")) for e in loose_entries}
-        if len(unique_source_names) > 1:
-            return None, "Loose partner match is ambiguous in the source file", "Normalized"
-        entry, state = _collapse_entries(loose_entries)
-        if state == "conflict":
-            return None, "Conflicting source rows for this partner", "Normalized"
-        if state == "missing_category":
-            entry = loose_entries[0]
-            return None, entry.get("category_error") or "Partner Category is empty", "Normalized"
-        return entry, "", "Normalized"
+        checks = [
+            (lookup["project_exact"].get(exact_key, []), "Project", f"Project exact{origin_suffix}"),
+            (lookup["partner_exact"].get(exact_key, []), "Partner", f"Partner exact{origin_suffix}"),
+            (lookup["project_loose"].get(loose_key, []), "Project", f"Project normalized{origin_suffix}"),
+            (lookup["partner_loose"].get(loose_key, []), "Partner", f"Partner normalized{origin_suffix}"),
+        ]
 
-    return None, "Partner not found in the source file", ""
+        for entries, source_kind, match_name in checks:
+            if not entries:
+                continue
+            entry, error, resolved_match = _resolve_tier_match(entries, source_kind, match_name)
+            if not error:
+                return entry, "", resolved_match
+            found_errors.append((error, resolved_match))
+
+    if found_errors:
+        return None, found_errors[0][0], found_errors[0][1]
+    return None, "Partner / Project not found in Partner or Project name columns", ""
 
 
 def _field_values(value):
@@ -695,6 +905,7 @@ def build_preview_rows(issues, base_url, partner_field_id, tier_field_id, lookup
             **common,
             "Partner": partner_value,
             "Source Partner": entry["partner"],
+            "Source Project": entry.get("project", ""),
             "Partner Category": entry["category"],
             "New tier": int(entry["tier"]),
             "Match": match_type,
@@ -927,13 +1138,13 @@ def render_partner_tier_maintenance():
 
     if actionable:
         st.subheader("Ready to update")
-        st.caption("Only rows with one safe partner match and one unambiguous tier number are eligible.")
+        st.caption("Matches are checked against both Partner and Project name. Only one safe source row/value is eligible.")
         action_df = st.data_editor(
             pd.DataFrame(actionable),
             hide_index=True,
             use_container_width=True,
             key="partner_tier_editor",
-            disabled=["Key", "Open", "Summary", "Status", "Partner", "Source Partner", "Partner Category", "New tier", "Match"],
+            disabled=["Key", "Open", "Summary", "Status", "Partner", "Source Partner", "Source Project", "Partner Category", "New tier", "Match"],
             column_config={
                 "Select": st.column_config.CheckboxColumn("Select", default=True),
                 "Open": st.column_config.LinkColumn("Open", display_text="Open"),

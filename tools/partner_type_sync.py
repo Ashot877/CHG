@@ -24,12 +24,14 @@ from tools.partner_tier_sync import (
     normalize_partner,
     normalize_partner_loose,
     normalize_space,
+    partner_match_candidates,
 )
 
 
 PARTNER_FIELD_NAME = str(PARTNER_TYPE_CONFIG.get("partner_field_name", "Partner / Project") or "Partner / Project")
 PARTNER_TYPE_FIELD_NAME = str(PARTNER_TYPE_CONFIG.get("partner_type_field_name", "Partner Type") or "Partner Type")
 PARTNER_COLUMN_NAME = str(PARTNER_TYPE_CONFIG.get("partner_column_name", "Partner") or "Partner")
+PROJECT_COLUMN_NAME = str(PARTNER_TYPE_CONFIG.get("project_column_name", "Project name") or "Project name")
 TYPE_COLUMN_NAME = str(PARTNER_TYPE_CONFIG.get("type_column_name", "Partner Type") or "Partner Type")
 
 DEFAULT_PARTNER_TYPE_JQL = f'''project = "Change Management"
@@ -45,20 +47,32 @@ AND Approvers NOT IN inactiveUsers()
 AND status WAS Open'''
 
 
-def _find_columns(matrix, partner_header=PARTNER_COLUMN_NAME, type_header=TYPE_COLUMN_NAME):
+def _find_columns(
+    matrix,
+    partner_header=PARTNER_COLUMN_NAME,
+    type_header=TYPE_COLUMN_NAME,
+    project_header=PROJECT_COLUMN_NAME,
+):
     wanted_partner = normalize_header(partner_header)
     wanted_type = normalize_header(type_header)
+    wanted_project = normalize_header(project_header)
 
     for row_index, row in enumerate(matrix[:20]):
         headers = [normalize_header(cell) for cell in row]
         partner_indexes = [i for i, value in enumerate(headers) if value == wanted_partner]
         type_indexes = [i for i, value in enumerate(headers) if value == wanted_type]
         if partner_indexes and type_indexes:
-            return row_index, partner_indexes[0], type_indexes[0]
+            project_indexes = [i for i, value in enumerate(headers) if value == wanted_project]
+            return row_index, partner_indexes[0], type_indexes[0], (project_indexes[0] if project_indexes else None)
     return None
 
 
-def _rows_from_matrix(matrix, partner_header=PARTNER_COLUMN_NAME, type_header=TYPE_COLUMN_NAME):
+def _rows_from_matrix(
+    matrix,
+    partner_header=PARTNER_COLUMN_NAME,
+    type_header=TYPE_COLUMN_NAME,
+    project_header=PROJECT_COLUMN_NAME,
+):
     clean_matrix = []
     for row in matrix:
         clean_row = [normalize_space(cell) for cell in row]
@@ -68,27 +82,38 @@ def _rows_from_matrix(matrix, partner_header=PARTNER_COLUMN_NAME, type_header=TY
     if not clean_matrix:
         return []
 
-    found = _find_columns(clean_matrix, partner_header, type_header)
+    found = _find_columns(clean_matrix, partner_header, type_header, project_header)
     if not found:
         return []
 
-    header_row, partner_col, type_col = found
+    header_row, partner_col, type_col, project_col = found
     result = []
+    current_partner = ""
     for row in clean_matrix[header_row + 1:]:
         partner = row[partner_col] if partner_col < len(row) else ""
+        if partner:
+            current_partner = partner
+        else:
+            partner = current_partner
+        project = row[project_col] if project_col is not None and project_col < len(row) else ""
         partner_type = row[type_col] if type_col < len(row) else ""
-        if partner or partner_type:
-            result.append({"Partner": partner, "Partner Type": partner_type})
+        if partner or project or partner_type:
+            result.append({"Partner": partner, "Project name": project, "Partner Type": partner_type})
     return result
 
 
-def parse_partner_type_rows_from_docx(data, partner_header=PARTNER_COLUMN_NAME, type_header=TYPE_COLUMN_NAME):
+def parse_partner_type_rows_from_docx(
+    data,
+    partner_header=PARTNER_COLUMN_NAME,
+    type_header=TYPE_COLUMN_NAME,
+    project_header=PROJECT_COLUMN_NAME,
+):
     document = Document(BytesIO(data))
     best_rows = []
 
     for table in document.tables:
         matrix = [[cell.text for cell in row.cells] for row in table.rows]
-        parsed = _rows_from_matrix(matrix, partner_header, type_header)
+        parsed = _rows_from_matrix(matrix, partner_header, type_header, project_header)
         if len(parsed) > len(best_rows):
             best_rows = parsed
 
@@ -99,15 +124,20 @@ def parse_partner_type_rows_from_docx(data, partner_header=PARTNER_COLUMN_NAME, 
     return best_rows
 
 
-def parse_partner_type_rows_from_doc(data, partner_header=PARTNER_COLUMN_NAME, type_header=TYPE_COLUMN_NAME):
+def parse_partner_type_rows_from_doc(
+    data,
+    partner_header=PARTNER_COLUMN_NAME,
+    type_header=TYPE_COLUMN_NAME,
+    project_header=PROJECT_COLUMN_NAME,
+):
     # Confluence commonly exports Word as HTML/MHTML with a .doc extension.
     # Some systems may also give DOCX bytes under a .doc filename.
     if is_docx_bytes(data):
-        return parse_partner_type_rows_from_docx(data, partner_header, type_header)
+        return parse_partner_type_rows_from_docx(data, partner_header, type_header, project_header)
 
     best_rows = []
     for matrix in extract_legacy_word_table_matrices(data):
-        parsed = _rows_from_matrix(matrix, partner_header, type_header)
+        parsed = _rows_from_matrix(matrix, partner_header, type_header, project_header)
         if len(parsed) > len(best_rows):
             best_rows = parsed
 
@@ -122,14 +152,19 @@ def _dataframe_matrix(df):
     return [["" if pd.isna(value) else str(value) for value in row] for row in df.values.tolist()]
 
 
-def parse_partner_type_rows_from_excel(data, partner_header=PARTNER_COLUMN_NAME, type_header=TYPE_COLUMN_NAME):
+def parse_partner_type_rows_from_excel(
+    data,
+    partner_header=PARTNER_COLUMN_NAME,
+    type_header=TYPE_COLUMN_NAME,
+    project_header=PROJECT_COLUMN_NAME,
+):
     book = pd.ExcelFile(BytesIO(data))
     best_rows = []
     best_sheet = ""
 
     for sheet_name in book.sheet_names:
         df = pd.read_excel(book, sheet_name=sheet_name, header=None, dtype=object)
-        parsed = _rows_from_matrix(_dataframe_matrix(df), partner_header, type_header)
+        parsed = _rows_from_matrix(_dataframe_matrix(df), partner_header, type_header, project_header)
         if len(parsed) > len(best_rows):
             best_rows = parsed
             best_sheet = str(sheet_name)
@@ -141,7 +176,12 @@ def parse_partner_type_rows_from_excel(data, partner_header=PARTNER_COLUMN_NAME,
     return best_rows, best_sheet
 
 
-def parse_partner_type_rows_from_csv(data, partner_header=PARTNER_COLUMN_NAME, type_header=TYPE_COLUMN_NAME):
+def parse_partner_type_rows_from_csv(
+    data,
+    partner_header=PARTNER_COLUMN_NAME,
+    type_header=TYPE_COLUMN_NAME,
+    project_header=PROJECT_COLUMN_NAME,
+):
     last_error = None
     for encoding in ("utf-8-sig", "utf-8", "cp1252"):
         try:
@@ -153,7 +193,7 @@ def parse_partner_type_rows_from_csv(data, partner_header=PARTNER_COLUMN_NAME, t
                 engine="python",
                 encoding=encoding,
             )
-            parsed = _rows_from_matrix(_dataframe_matrix(df), partner_header, type_header)
+            parsed = _rows_from_matrix(_dataframe_matrix(df), partner_header, type_header, project_header)
             if parsed:
                 return parsed
         except Exception as error:
@@ -206,25 +246,60 @@ def _collapse_entries(entries):
 
 
 def build_partner_type_lookup(rows):
-    exact = defaultdict(list)
-    loose = defaultdict(list)
+    partner_exact = defaultdict(list)
+    partner_loose = defaultdict(list)
+    project_exact = defaultdict(list)
+    project_loose = defaultdict(list)
     prepared = []
 
     for row in rows:
         partner = normalize_space(row.get("Partner"))
+        project = normalize_space(row.get("Project name"))
         partner_type = normalize_space(row.get("Partner Type"))
-        if not partner:
+        if not partner and not project:
             continue
 
         entry = {
             "partner": partner,
+            "project": project,
             "partner_type": partner_type,
         }
         prepared.append(entry)
-        exact[normalize_partner(partner)].append(entry)
-        loose[normalize_partner_loose(partner)].append(entry)
+        if partner:
+            partner_exact[normalize_partner(partner)].append(entry)
+            partner_loose[normalize_partner_loose(partner)].append(entry)
+        if project and project not in {"-", "—", "–"}:
+            project_exact[normalize_partner(project)].append(entry)
+            project_loose[normalize_partner_loose(project)].append(entry)
 
-    return {"exact": exact, "loose": loose, "rows": prepared}
+    return {
+        "partner_exact": partner_exact,
+        "partner_loose": partner_loose,
+        "project_exact": project_exact,
+        "project_loose": project_loose,
+        "rows": prepared,
+    }
+
+
+def _resolve_partner_type_match(entries, source_kind, match_name):
+    if not entries:
+        return None, "", match_name
+
+    if source_kind == "Project":
+        parent_partners = {normalize_partner(entry.get("partner")) for entry in entries if entry.get("partner")}
+        if len(parent_partners) > 1:
+            return None, "Project name match is ambiguous across multiple partners", match_name
+    else:
+        source_partners = {normalize_partner(entry.get("partner")) for entry in entries if entry.get("partner")}
+        if len(source_partners) > 1:
+            return None, "Partner match is ambiguous in the source file", match_name
+
+    entry, state = _collapse_entries(entries)
+    if state == "conflict":
+        return None, f"Conflicting Partner Type values for matched {source_kind.lower()}", match_name
+    if state == "missing_type":
+        return None, "Partner Type is empty in the source file", match_name
+    return entry, "", match_name
 
 
 def match_partner_type(lookup, partner_value):
@@ -232,29 +307,30 @@ def match_partner_type(lookup, partner_value):
     if not partner_value:
         return None, "Partner / Project is empty", ""
 
-    exact_entries = lookup["exact"].get(normalize_partner(partner_value), [])
-    if exact_entries:
-        entry, state = _collapse_entries(exact_entries)
-        if state == "conflict":
-            return None, "Conflicting Partner Type values in the source file", "Exact"
-        if state == "missing_type":
-            return None, "Partner Type is empty in the source file", "Exact"
-        return entry, "", "Exact"
+    found_errors = []
+    for candidate, origin in partner_match_candidates(partner_value):
+        exact_key = normalize_partner(candidate)
+        loose_key = normalize_partner_loose(candidate)
+        origin_suffix = "" if origin == "Original" else f" · {origin}"
 
-    loose_entries = lookup["loose"].get(normalize_partner_loose(partner_value), [])
-    if loose_entries:
-        unique_source_names = {normalize_partner(entry.get("partner")) for entry in loose_entries}
-        if len(unique_source_names) > 1:
-            return None, "Loose partner match is ambiguous in the source file", "Normalized"
+        checks = [
+            (lookup["project_exact"].get(exact_key, []), "Project", f"Project exact{origin_suffix}"),
+            (lookup["partner_exact"].get(exact_key, []), "Partner", f"Partner exact{origin_suffix}"),
+            (lookup["project_loose"].get(loose_key, []), "Project", f"Project normalized{origin_suffix}"),
+            (lookup["partner_loose"].get(loose_key, []), "Partner", f"Partner normalized{origin_suffix}"),
+        ]
 
-        entry, state = _collapse_entries(loose_entries)
-        if state == "conflict":
-            return None, "Conflicting Partner Type values in the source file", "Normalized"
-        if state == "missing_type":
-            return None, "Partner Type is empty in the source file", "Normalized"
-        return entry, "", "Normalized"
+        for entries, source_kind, match_name in checks:
+            if not entries:
+                continue
+            entry, error, resolved_match = _resolve_partner_type_match(entries, source_kind, match_name)
+            if not error:
+                return entry, "", resolved_match
+            found_errors.append((error, resolved_match))
 
-    return None, "Partner not found in the source file", ""
+    if found_errors:
+        return None, found_errors[0][0], found_errors[0][1]
+    return None, "Partner / Project not found in Partner or Project name columns", ""
 
 
 def _field_values(value):
@@ -321,6 +397,7 @@ def build_partner_type_preview_rows(issues, base_url, partner_field_id, type_fie
             **common,
             "Partner": partner_value,
             "Source Partner": entry["partner"],
+            "Source Project": entry.get("project", ""),
             "New Partner Type": entry["partner_type"],
             "Match": match_type,
         })
@@ -570,7 +647,7 @@ def render_partner_type_maintenance():
 
     if actionable:
         st.subheader("Ready to update")
-        st.caption("Only rows with one safe partner match and one non-empty Partner Type are eligible.")
+        st.caption("Matches are checked against both Partner and Project name. Only one safe source value is eligible.")
         action_df = st.data_editor(
             pd.DataFrame(actionable),
             hide_index=True,
@@ -583,6 +660,7 @@ def render_partner_type_maintenance():
                 "Status",
                 "Partner",
                 "Source Partner",
+                "Source Project",
                 "New Partner Type",
                 "Match",
             ],
