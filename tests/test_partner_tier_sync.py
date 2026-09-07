@@ -188,3 +188,13 @@ def test_confluence_doc_html_export_parser():
     assert rows[1]["Partner"] == "GrandPashaBet"
     assert rows[1]["Project name"] == "Solibet"
     assert rows[1]["Partner Category"] == "Group 4(New)"
+
+
+def test_partner_tier_repeated_partner_project_pair_collapses_to_partner():
+    lookup = build_partner_lookup([
+        {"Partner": "Festwin", "Project name": "-", "Partner Category": "Group 3"},
+    ])
+    entry, error, match = match_partner(lookup, "Festwin - Festwin")
+    assert error == ""
+    assert entry["tier"] == 3
+    assert "Repeated pair" in match

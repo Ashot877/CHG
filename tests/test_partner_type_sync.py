@@ -16,6 +16,7 @@ from tools.partner_type_sync import (
     match_partner_type,
     parse_partner_type_rows_from_doc,
     parse_partner_type_rows_from_docx,
+    _rows_from_matrix,
 )
 
 
@@ -25,7 +26,7 @@ def test_partner_type_word_parser():
     table.cell(0, 0).text = "Partner"
     table.cell(0, 1).text = "Project name"
     table.cell(0, 2).text = "Partner Category"
-    table.cell(0, 3).text = "Partner Type"
+    table.cell(0, 3).text = "Solution type"
     table.cell(1, 0).text = "GrandPashaBet"
     table.cell(1, 1).text = "Betsin"
     table.cell(1, 3).text = "Builder (Turnkey)"
@@ -132,7 +133,7 @@ def test_duplicate_project_across_parents_is_blocked():
 
 def test_partner_type_confluence_doc_html_export_with_rowspan():
     data = b"""<html><body><table>
-    <tr><th>Partner</th><th>Project name</th><th>Partner Category</th><th>Partner Type</th></tr>
+    <tr><th>Partner</th><th>Project name</th><th>Partner Category</th><th>Solution type</th></tr>
     <tr><td rowspan=\"2\">GrandPashaBet</td><td>Betsin</td><td>Group 4</td><td>Builder (Turnkey)</td></tr>
     <tr><td>Solibet</td><td>Group 4</td><td>Casweb (Turnkey)</td></tr>
     </table></body></html>"""
@@ -142,3 +143,33 @@ def test_partner_type_confluence_doc_html_export_with_rowspan():
     assert rows[1]["Partner"] == "GrandPashaBet"
     assert rows[1]["Project name"] == "Solibet"
     assert rows[1]["Partner Type"] == "Casweb (Turnkey)"
+
+
+def test_old_partner_type_header_is_still_accepted():
+    matrix = [
+        ["Partner", "Project name", "Partner Type"],
+        ["LegacyPartner", "", "B2B"],
+    ]
+    rows = _rows_from_matrix(matrix)
+    assert rows == [{"Partner": "LegacyPartner", "Project name": "", "Partner Type": "B2B"}]
+
+
+def test_partner_type_repeated_partner_project_pair_collapses_to_partner():
+    lookup = build_partner_type_lookup([
+        {"Partner": "Festwin", "Project name": "-", "Partner Type": "Casweb (Turnkey)"},
+    ])
+    entry, error, match = match_partner_type(lookup, "Festwin - Festwin")
+    assert error == ""
+    assert entry["partner"] == "Festwin"
+    assert entry["partner_type"] == "Casweb (Turnkey)"
+    assert "Repeated pair" in match
+
+
+def test_partner_type_repeated_pair_with_unicode_dash_collapses_to_partner():
+    lookup = build_partner_type_lookup([
+        {"Partner": "Festwin", "Project name": "-", "Partner Type": "Casweb (Turnkey)"},
+    ])
+    entry, error, match = match_partner_type(lookup, "Festwin – Festwin")
+    assert error == ""
+    assert entry["partner_type"] == "Casweb (Turnkey)"
+    assert "Repeated pair" in match
