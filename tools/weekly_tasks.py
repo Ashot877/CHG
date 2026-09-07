@@ -311,7 +311,7 @@ def page_weekly_tasks_helper():
         "Weekly Operations",
         "One place for recurring Change Management work: SLA follow-up and controlled Jira data maintenance.",
         ["SLA follow-up", "Partner Tier Sync", "Safe bulk actions"],
-        eyebrow="Digitain · Change Management · Weekly Operations",
+        eyebrow="Weekly Operations",
     )
 
     st.markdown('<div class="step-kicker">Choose workspace</div>', unsafe_allow_html=True)
