@@ -1,8 +1,11 @@
 import re
 import unicodedata
 from collections import defaultdict
+from email import policy
+from email.parser import BytesParser
 from io import BytesIO
 from html.parser import HTMLParser
+import xml.etree.ElementTree as ET
 from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
@@ -358,6 +361,154 @@ def parse_partner_rows_from_docx(data, partner_header="Partner", category_header
     return best_rows
 
 
+DOCX_MAGIC = b"PK\x03\x04"
+OLE_DOC_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
+def is_docx_bytes(data):
+    return bool(data) and data.startswith(DOCX_MAGIC)
+
+
+def _decode_legacy_word_text(data):
+    """Decode Word-compatible HTML/XML .doc exports."""
+    if not data:
+        return ""
+
+    prefix = data[:8192].decode("latin-1", errors="ignore")
+    charset_match = re.search(r"charset\s*=\s*[\"']?([a-zA-Z0-9._-]+)", prefix, re.IGNORECASE)
+    encodings = []
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        encodings.append("utf-16")
+    if charset_match:
+        encodings.append(charset_match.group(1))
+    encodings.extend(["utf-8-sig", "utf-8", "cp1252", "latin-1"])
+
+    seen = set()
+    for encoding in encodings:
+        key = str(encoding).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            return data.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return data.decode("latin-1", errors="ignore")
+
+
+def _extract_mhtml_html(data):
+    try:
+        message = BytesParser(policy=policy.default).parsebytes(data)
+    except Exception:
+        return ""
+
+    parts = message.walk() if message.is_multipart() else [message]
+    for part in parts:
+        try:
+            if str(part.get_content_type()).lower() != "text/html":
+                continue
+            content = part.get_content()
+            if isinstance(content, bytes):
+                return _decode_legacy_word_text(content)
+            return str(content or "")
+        except Exception:
+            continue
+    return ""
+
+
+def _html_matrices(html):
+    matrices = []
+    for table in _parse_html_tables(html):
+        matrix = [_row_texts(row) for row in table]
+        if matrix:
+            matrices.append(matrix)
+    return matrices
+
+
+def _xml_local_name(tag):
+    return str(tag or "").rsplit("}", 1)[-1].split(":")[-1].lower()
+
+
+def _word_xml_matrices(text):
+    try:
+        root = ET.fromstring(text)
+    except Exception:
+        return []
+
+    matrices = []
+    for table in root.iter():
+        if _xml_local_name(table.tag) != "tbl":
+            continue
+        matrix = []
+        for row in table.iter():
+            if _xml_local_name(row.tag) != "tr":
+                continue
+            cells = []
+            for cell in list(row):
+                if _xml_local_name(cell.tag) != "tc":
+                    continue
+                cells.append(normalize_space(" ".join(cell.itertext())))
+            if cells:
+                matrix.append(cells)
+        if matrix:
+            matrices.append(matrix)
+    return matrices
+
+
+def extract_legacy_word_table_matrices(data):
+    """Extract tables from Confluence .doc exports without guessing Jira values.
+
+    Confluence often gives an HTML/MHTML file with a .doc extension. Word XML is
+    also supported. A true binary Word 97-2003 file is rejected explicitly.
+    """
+    if is_docx_bytes(data):
+        raise ValueError("DOCX payload should be parsed with the .docx parser.")
+
+    if data.startswith(OLE_DOC_MAGIC):
+        raise ValueError(
+            "This is a true binary Word 97-2003 .doc file. Confluence exports are usually HTML-based and work directly. "
+            "For this binary file, open it in Word and Save As .docx before upload."
+        )
+
+    mhtml_html = _extract_mhtml_html(data)
+    if mhtml_html:
+        matrices = _html_matrices(mhtml_html)
+        if matrices:
+            return matrices
+
+    text = _decode_legacy_word_text(data)
+    if re.search(r"<\s*(?:html|table|!doctype)\b", text, re.IGNORECASE):
+        matrices = _html_matrices(text)
+        if matrices:
+            return matrices
+
+    matrices = _word_xml_matrices(text)
+    if matrices:
+        return matrices
+
+    raise ValueError(
+        "Could not read tables from this .doc file. The helper supports Confluence Word-compatible .doc exports, DOCX, Excel, and CSV."
+    )
+
+
+def parse_partner_rows_from_doc(data, partner_header="Partner", category_header="Partner Category"):
+    # Some exports use a .doc name for OOXML bytes. Content detection is safer than trusting the extension.
+    if is_docx_bytes(data):
+        return parse_partner_rows_from_docx(data, partner_header, category_header)
+
+    best_rows = []
+    for matrix in extract_legacy_word_table_matrices(data):
+        parsed = _rows_from_matrix(matrix, partner_header, category_header)
+        if len(parsed) > len(best_rows):
+            best_rows = parsed
+
+    if not best_rows:
+        raise ValueError(
+            f'Could not find a Word table with "{partner_header}" and "{category_header}" columns.'
+        )
+    return best_rows
+
+
 def _dataframe_matrix(df):
     return [["" if pd.isna(value) else str(value) for value in row] for row in df.values.tolist()]
 
@@ -406,6 +557,9 @@ def load_partner_rows_from_upload(uploaded_file):
     partner_header = str(PARTNER_TIER_CONFIG.get("partner_column_name", "Partner") or "Partner")
     category_header = str(PARTNER_TIER_CONFIG.get("category_column_name", "Partner Category") or "Partner Category")
 
+    if suffix == "doc":
+        rows = parse_partner_rows_from_doc(data, partner_header, category_header)
+        return rows, f"{name} · Confluence Word export"
     if suffix == "docx":
         rows = parse_partner_rows_from_docx(data, partner_header, category_header)
         return rows, f"{name} · Word export"
@@ -417,7 +571,7 @@ def load_partner_rows_from_upload(uploaded_file):
         rows = parse_partner_rows_from_csv(data, partner_header, category_header)
         return rows, name
 
-    raise ValueError("Unsupported source file. Upload .docx, .xlsx, .xlsm, or .csv.")
+    raise ValueError("Unsupported source file. Upload .doc, .docx, .xlsx, .xlsm, or .csv.")
 
 
 def _collapse_entries(entries):
@@ -653,12 +807,12 @@ def render_partner_tier_maintenance():
     source_col, action_col = st.columns([4.2, 1.1])
     with source_col:
         st.markdown("### Source file")
-        st.caption("Weekly default: upload the newest Word export. Excel and CSV remain supported.")
+        st.caption("Weekly default: upload the newest Word export (.doc or .docx). Excel and CSV remain supported.")
         uploaded_file = st.file_uploader(
             "Partner Information file",
-            type=["docx", "xlsx", "xlsm", "csv"],
+            type=["doc", "docx", "xlsx", "xlsm", "csv"],
             key="partner_tier_source_file",
-            help="In Confluence choose Export to Word, then upload the exported .docx.",
+            help="In Confluence choose Export to Word, then upload the exported .doc or .docx file.",
             label_visibility="collapsed",
         )
     with action_col:
@@ -698,7 +852,7 @@ def render_partner_tier_maintenance():
         if not require_jira_settings():
             return
         if source_mode == "Upload file" and uploaded_file is None:
-            st.error("Upload the Partner Information file first. For Confluence, use Export to Word and upload the .docx.")
+            st.error("Upload the Partner Information file first. For Confluence, use Export to Word and upload the .doc or .docx.")
             return
         if source_mode == "Confluence URL" and not page_url.strip():
             st.error("Confluence page URL is empty.")

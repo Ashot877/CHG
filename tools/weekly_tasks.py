@@ -12,6 +12,7 @@ from core.session import current_jira_context, require_jira_settings
 from core.ui import render_hero
 from core.utils import compact, field_to_text, user_display
 from tools.partner_tier_sync import render_partner_tier_maintenance
+from tools.partner_type_sync import render_partner_type_maintenance
 
 WEEKLY_TASKS = {
     "AM Time to Review": {
@@ -310,7 +311,7 @@ def page_weekly_tasks_helper():
     render_hero(
         "Weekly Operations",
         "One place for recurring Change Management work: SLA follow-up and controlled Jira data maintenance.",
-        ["SLA follow-up", "Partner Tier Sync", "Safe bulk actions"],
+        ["SLA follow-up", "Partner Tier", "Partner Type"],
         eyebrow="Weekly Operations",
     )
 
@@ -331,6 +332,20 @@ def page_weekly_tasks_helper():
             unsafe_allow_html=True,
         )
         render_follow_up_tasks()
+        return
+
+    st.markdown('<div class="step-kicker">Maintenance task</div>', unsafe_allow_html=True)
+    maintenance_task = st.radio(
+        "Maintenance task",
+        ["Partner Tier", "Partner Type"],
+        horizontal=True,
+        key="weekly_maintenance_task",
+        label_visibility="collapsed",
+        help="Both tools use the same Partner Information Word/Excel/CSV source file.",
+    )
+
+    if maintenance_task == "Partner Type":
+        render_partner_type_maintenance()
         return
 
     render_partner_tier_maintenance()
