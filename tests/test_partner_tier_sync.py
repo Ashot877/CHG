@@ -1,5 +1,8 @@
 import sys
 import types
+from io import BytesIO
+
+from docx import Document
 
 try:
     import streamlit  # noqa: F401
@@ -14,6 +17,7 @@ from tools.partner_tier_sync import (
     match_partner,
     normalize_partner,
     parse_partner_rows_from_html,
+    parse_partner_rows_from_docx,
 )
 
 
@@ -68,4 +72,24 @@ def test_html_table_parser():
     """
     rows = parse_partner_rows_from_html(html)
     assert rows[0]["Partner"] == "1betpro"
+    assert rows[1]["Partner Category"] == "Group 4(New)"
+
+
+def test_word_export_table_parser():
+    doc = Document()
+    table = doc.add_table(rows=3, cols=3)
+    table.cell(0, 0).text = "Partner"
+    table.cell(0, 1).text = "Project name"
+    table.cell(0, 2).text = "Partner Category"
+    table.cell(1, 0).text = "1betpro"
+    table.cell(1, 1).text = "-"
+    table.cell(1, 2).text = "Group 5"
+    table.cell(2, 0).text = "188bet"
+    table.cell(2, 1).text = "-"
+    table.cell(2, 2).text = "Group 4(New)"
+
+    buffer = BytesIO()
+    doc.save(buffer)
+    rows = parse_partner_rows_from_docx(buffer.getvalue())
+    assert rows[0] == {"Partner": "1betpro", "Partner Category": "Group 5"}
     assert rows[1]["Partner Category"] == "Group 4(New)"
