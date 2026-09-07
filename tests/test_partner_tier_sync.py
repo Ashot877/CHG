@@ -17,6 +17,7 @@ from tools.partner_tier_sync import (
     match_partner,
     normalize_partner,
     parse_partner_rows_from_html,
+    parse_partner_rows_from_doc,
     parse_partner_rows_from_docx,
 )
 
@@ -91,5 +92,16 @@ def test_word_export_table_parser():
     buffer = BytesIO()
     doc.save(buffer)
     rows = parse_partner_rows_from_docx(buffer.getvalue())
+    assert rows[0] == {"Partner": "1betpro", "Partner Category": "Group 5"}
+    assert rows[1]["Partner Category"] == "Group 4(New)"
+
+
+def test_confluence_doc_html_export_parser():
+    data = b"""<html><body><table>
+    <tr><th>Partner</th><th>Partner Category</th><th>Partner Type</th></tr>
+    <tr><td>1betpro</td><td>Group 5</td><td>B2B</td></tr>
+    <tr><td>188bet</td><td>Group 4(New)</td><td>White Label</td></tr>
+    </table></body></html>"""
+    rows = parse_partner_rows_from_doc(data)
     assert rows[0] == {"Partner": "1betpro", "Partner Category": "Group 5"}
     assert rows[1]["Partner Category"] == "Group 4(New)"
