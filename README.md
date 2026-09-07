@@ -1,68 +1,78 @@
-# Change Helper — internal operations workspace
+# Change Helper
 
-The original single-file Streamlit app was split by responsibility without changing the working logic of AM Handover, ROX Domain Grouper, Excel Splitter, or the existing Weekly Follow-up flow.
+Internal Streamlit workspace for recurring Change Management tasks.
 
-## New structure
+## Structure
 
-- `app.py` — entry point and routing
-- `core/` — config, Jira API, session/auth, shared UI/styles, generic formatters
-- `tools/am_handover.py` — existing AM Handover
-- `tools/weekly_tasks.py` — Weekly Tasks shell + existing Follow-up flow
-- `tools/partner_tier_sync.py` — new Data Maintenance → Partner Tier Sync
-- `tools/rox_domain_grouper.py` — existing ROX tool
-- `tools/excel_splitter.py` — existing Excel tool
+- `app.py` — single app entry point and routing
+- `core/` — Jira API, auth/session, shared UI and helpers
+- `tools/weekly_tasks.py` — Weekly Operations shell + existing Follow-up flow
+- `tools/partner_tier_sync.py` — Data Maintenance → Partner Tier Sync
+- `tools/partner_type_sync.py` — Data Maintenance → Partner Type Sync
+- `tools/am_handover.py` — AM Handover
+- `tools/rox_domain_grouper.py` — ROX Domains
+- `tools/excel_splitter.py` — Excel Splitter
 
-Run it with:
+Run:
 
 ```bash
 streamlit run app.py
 ```
 
-## Partner Tier Sync behavior
+## Weekly Operations → Data Maintenance
 
-1. Runs the configured JQL and finds Jira tickets whose `Partner tier` should be empty.
-2. Loads the weekly Partner Information source. Recommended: Confluence → **Export to Word** → upload the `.docx`. `.xlsx`, `.xlsm`, and `.csv` are also supported. Direct Confluence URL remains optional for environments that can reach the corporate network.
-3. Matches `Partner / Project` safely:
-   - exact normalized match first;
-   - then a whitespace/separator-insensitive match only when that match is unique.
-4. Extracts the tier number from Partner Category:
-   - `Group 4`
-   - `Group 4(New)`
-   - ` group   4 `
-   - `GROUP 4`
-   all resolve to tier `4`.
-5. It **does not update** a ticket when:
-   - `Partner / Project` is empty;
-   - the partner is not found in the uploaded source;
-   - the normalized source match is ambiguous;
-   - `Partner Category` is empty;
-   - no clear tier number can be extracted;
-   - duplicate source rows contain conflicting tiers;
-   - the Jira ticket unexpectedly already has Partner tier filled.
-6. Shows two preview tables: `Ready to update` and `Blocked / needs manual check`.
-7. Jira writes happen only after selecting rows and checking the explicit confirmation box.
+There are now two separate maintenance tools.
 
-## Weekly source flow
+### Partner Tier Sync
 
-The recommended flow for Streamlit Cloud is:
+The helper:
 
-1. Open the Partner Information page in Confluence.
-2. Choose **Export to Word**.
-3. Upload the exported `.docx` in `Weekly Tasks Helper → Data Maintenance → Partner Tier Sync`.
-4. Click `Preview sync`.
-5. Review `Ready to update` and `Blocked / needs manual check`.
-6. Confirm and update only the selected safe rows.
+1. Finds Jira tickets where `Partner tier` is empty.
+2. Reads `Partner` + `Partner Category` from the weekly Partner Information export.
+3. Matches the Jira `Partner / Project` safely.
+4. Extracts the numeric tier from values such as `Group 4`, `Group 4(New)`, `GROUP 4`, or ` group   4 `.
+5. Shows `Ready to update` and `Blocked / needs manual check` before any Jira write.
+6. Updates only selected rows after explicit confirmation.
 
-The uploader scans Word tables for `Partner` and `Partner Category`. Excel files are scanned across all sheets and tolerate title rows above the actual header.
+It never guesses when the partner is missing, ambiguous, duplicated with conflicting values, or the category does not contain one clear tier number.
 
-## Optional Confluence access
+### Partner Type Sync
 
-Direct Confluence URL mode is still available for installations running inside the corporate network. Add the `[partner_tier]` section from `.streamlit/secrets.example.toml` only if you want that mode. Streamlit Cloud usually cannot resolve internal-only Confluence hosts.
+The second maintenance tool uses the same Partner Information export but reads the `Partner Type` column.
 
-## 2026 UI refresh
+It:
 
-The sidebar now contains only the four real working tools: **Weekly Tasks**, **AM Handover**, **ROX Domains**, and **Excel Splitter**. The empty Dashboard and Settings destinations were removed from navigation.
+1. Finds Jira tickets where `Partner Type` is empty.
+2. Matches by `Partner / Project` using the same safe exact/normalized logic.
+3. Blocks missing, ambiguous, or conflicting source values.
+4. Shows the proposed `New Partner Type` before writing anything.
+5. Uses Jira edit metadata where available so select-option fields can be updated correctly.
 
-The visual system was refreshed for a darker premium internal-product feel: graphite navigation, warm Digitain-inspired accent, compact page headers, segmented workspace controls, cleaner cards, metrics, upload zones, tables, and confirmation actions.
+## Supported source files
 
-For Partner Tier Sync, the recommended source is now the weekly **Confluence → Export to Word → upload `.docx`** flow. Direct Confluence remains under an Advanced section for future use from an internal network.
+Both Partner Tier and Partner Type accept:
+
+- `.doc` — including the Word-compatible HTML/MHTML format commonly produced by Confluence Export to Word
+- `.docx`
+- `.xlsx`
+- `.xlsm`
+- `.csv`
+
+The app detects content rather than trusting only the extension, so a DOCX payload named `.doc` is also handled.
+
+For safety, a true old binary Word 97-2003 OLE `.doc` is not parsed by guessing table boundaries. If such a file is encountered, the UI gives a clear message to Save As `.docx` instead.
+
+## Dashboard / Settings cleanup
+
+Dashboard and Settings are not part of the app anymore.
+
+Two protections prevent old stale `pages/dashboard.py` / `pages/settings.py` files from appearing in Streamlit navigation:
+
+- `app.py` runs the application through a hidden `st.navigation` page on modern Streamlit versions, which disables legacy `pages/` routing.
+- `.streamlit/config.toml` also sets `client.showSidebarNavigation = false` as a fallback before the first render.
+
+For a clean repository, delete old `pages/dashboard.py` and `pages/settings.py` once. They are not included in this project.
+
+## Secrets
+
+Keep the real `.streamlit/secrets.toml` outside Git. The included `.streamlit/secrets.example.toml` only documents optional configuration keys.
