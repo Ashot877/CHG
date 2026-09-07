@@ -1,10 +1,12 @@
 import re
 import unicodedata
 from collections import defaultdict
+from io import BytesIO
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
+from docx import Document
 import requests
 import streamlit as st
 from requests.auth import HTTPBasicAuth
@@ -315,6 +317,109 @@ def load_confluence_partner_rows(page_url, jira_auth=None):
     )
 
 
+def _rows_from_matrix(matrix, partner_header="Partner", category_header="Partner Category"):
+    """Extract Partner/Partner Category rows from a rectangular text matrix."""
+    rows = [
+        [{"text": normalize_space(cell), "header": False} for cell in row]
+        for row in matrix
+        if any(normalize_space(cell) for cell in row)
+    ]
+    if not rows:
+        return []
+
+    named = _find_named_columns(rows, partner_header, category_header)
+    if not named:
+        return []
+
+    header_row, partner_col, category_col = named
+    parsed = []
+    for row in rows[header_row + 1:]:
+        texts = _row_texts(row)
+        partner = texts[partner_col] if partner_col < len(texts) else ""
+        category = texts[category_col] if category_col < len(texts) else ""
+        if partner or category:
+            parsed.append({"Partner": partner, "Partner Category": category})
+    return parsed
+
+
+def parse_partner_rows_from_docx(data, partner_header="Partner", category_header="Partner Category"):
+    document = Document(BytesIO(data))
+    best_rows = []
+    for table in document.tables:
+        matrix = [[cell.text for cell in row.cells] for row in table.rows]
+        parsed = _rows_from_matrix(matrix, partner_header, category_header)
+        if len(parsed) > len(best_rows):
+            best_rows = parsed
+
+    if not best_rows:
+        raise ValueError(
+            f'Could not find a Word table with "{partner_header}" and "{category_header}" columns.'
+        )
+    return best_rows
+
+
+def _dataframe_matrix(df):
+    return [["" if pd.isna(value) else str(value) for value in row] for row in df.values.tolist()]
+
+
+def parse_partner_rows_from_excel(data, partner_header="Partner", category_header="Partner Category"):
+    book = pd.ExcelFile(BytesIO(data))
+    best_rows = []
+    best_sheet = ""
+    for sheet_name in book.sheet_names:
+        df = pd.read_excel(book, sheet_name=sheet_name, header=None, dtype=object)
+        parsed = _rows_from_matrix(_dataframe_matrix(df), partner_header, category_header)
+        if len(parsed) > len(best_rows):
+            best_rows = parsed
+            best_sheet = str(sheet_name)
+
+    if not best_rows:
+        raise ValueError(
+            f'Could not find an Excel sheet with "{partner_header}" and "{category_header}" columns.'
+        )
+    return best_rows, best_sheet
+
+
+def parse_partner_rows_from_csv(data, partner_header="Partner", category_header="Partner Category"):
+    last_error = None
+    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
+        try:
+            df = pd.read_csv(BytesIO(data), header=None, dtype=object, sep=None, engine="python", encoding=encoding)
+            parsed = _rows_from_matrix(_dataframe_matrix(df), partner_header, category_header)
+            if parsed:
+                return parsed
+        except Exception as error:
+            last_error = error
+    raise ValueError(
+        f'Could not find CSV columns "{partner_header}" and "{category_header}".'
+        + (f" Details: {last_error}" if last_error else "")
+    )
+
+
+def load_partner_rows_from_upload(uploaded_file):
+    if uploaded_file is None:
+        raise ValueError("Source file is not uploaded.")
+
+    name = str(getattr(uploaded_file, "name", "") or "source").strip()
+    suffix = name.lower().rsplit(".", 1)[-1] if "." in name else ""
+    data = uploaded_file.getvalue()
+    partner_header = str(PARTNER_TIER_CONFIG.get("partner_column_name", "Partner") or "Partner")
+    category_header = str(PARTNER_TIER_CONFIG.get("category_column_name", "Partner Category") or "Partner Category")
+
+    if suffix == "docx":
+        rows = parse_partner_rows_from_docx(data, partner_header, category_header)
+        return rows, f"{name} · Word export"
+    if suffix in ("xlsx", "xlsm"):
+        rows, sheet = parse_partner_rows_from_excel(data, partner_header, category_header)
+        title = f"{name} · sheet: {sheet}" if sheet else name
+        return rows, title
+    if suffix == "csv":
+        rows = parse_partner_rows_from_csv(data, partner_header, category_header)
+        return rows, name
+
+    raise ValueError("Unsupported source file. Upload .docx, .xlsx, .xlsm, or .csv.")
+
+
 def _collapse_entries(entries):
     valid = [entry for entry in entries if entry.get("tier") is not None]
     if not valid:
@@ -358,7 +463,7 @@ def match_partner(lookup, partner_value):
     if exact_entries:
         entry, state = _collapse_entries(exact_entries)
         if state == "conflict":
-            return None, "Conflicting Confluence rows for this partner", "Exact"
+            return None, "Conflicting source rows for this partner", "Exact"
         if state == "missing_category":
             entry = exact_entries[0]
             return None, entry.get("category_error") or "Partner Category is empty", "Exact"
@@ -369,16 +474,16 @@ def match_partner(lookup, partner_value):
     if loose_entries:
         unique_source_names = {normalize_partner(e.get("partner")) for e in loose_entries}
         if len(unique_source_names) > 1:
-            return None, "Loose partner match is ambiguous in Confluence", "Normalized"
+            return None, "Loose partner match is ambiguous in the source file", "Normalized"
         entry, state = _collapse_entries(loose_entries)
         if state == "conflict":
-            return None, "Conflicting Confluence rows for this partner", "Normalized"
+            return None, "Conflicting source rows for this partner", "Normalized"
         if state == "missing_category":
             entry = loose_entries[0]
             return None, entry.get("category_error") or "Partner Category is empty", "Normalized"
         return entry, "", "Normalized"
 
-    return None, "Partner not found in Confluence", ""
+    return None, "Partner not found in the source file", ""
 
 
 def _field_values(value):
@@ -435,7 +540,7 @@ def build_preview_rows(issues, base_url, partner_field_id, tier_field_id, lookup
             "Select": True,
             **common,
             "Partner": partner_value,
-            "Confluence Partner": entry["partner"],
+            "Source Partner": entry["partner"],
             "Partner Category": entry["category"],
             "New tier": int(entry["tier"]),
             "Match": match_type,
@@ -520,10 +625,11 @@ def _clear_partner_tier_state():
 
 def render_partner_tier_maintenance():
     st.markdown(
-        '''<div class="maintenance-banner">
-        <div class="maintenance-title">🧩 Partner Tier Sync</div>
-        <div class="maintenance-text">Find Change tickets with an empty Partner tier, match Partner / Project against Confluence, extract the group number from Partner Category, preview everything, then update only explicitly selected safe matches.</div>
-        </div>''',
+        """<div class="feature-panel">
+        <div class="step-kicker">Data maintenance · Partner master data</div>
+        <div class="feature-title">Partner Tier Sync</div>
+        <div class="feature-text">Export the current Partner Information page to Word, upload it here, review every proposed Jira change, and apply only the rows that are safe and unambiguous.</div>
+        </div>""",
         unsafe_allow_html=True,
     )
 
@@ -531,27 +637,57 @@ def render_partner_tier_maintenance():
     configured_url = str(PARTNER_TIER_CONFIG.get("confluence_page_url", "") or "")
     default_jql = str(PARTNER_TIER_CONFIG.get("jql", "") or DEFAULT_PARTNER_TIER_JQL)
 
-    source_col, action_col = st.columns([3.4, 1.2])
+    step1, step2, step3 = st.columns(3)
+    with step1:
+        st.markdown("""<div class="mini-card"><div class="step-kicker">Step 01</div><div class="tool-card-title">Export source</div><div class="tool-card-text">Confluence → Export to Word. Use the fresh file each week.</div></div>""", unsafe_allow_html=True)
+    with step2:
+        st.markdown("""<div class="mini-card"><div class="step-kicker">Step 02</div><div class="tool-card-title">Preview changes</div><div class="tool-card-text">The helper matches Partner / Project and extracts the group number safely.</div></div>""", unsafe_allow_html=True)
+    with step3:
+        st.markdown("""<div class="mini-card"><div class="step-kicker">Step 03</div><div class="tool-card-title">Confirm update</div><div class="tool-card-text">Blocked or ambiguous rows stay untouched. Jira updates require explicit confirmation.</div></div>""", unsafe_allow_html=True)
+
+    st.write("")
+    source_mode = "Upload file"
+    uploaded_file = None
+    page_url = ""
+
+    source_col, action_col = st.columns([4.2, 1.1])
     with source_col:
-        page_url = st.text_input(
-            "Confluence page URL",
-            value=configured_url,
-            key="partner_tier_confluence_url",
-            placeholder="https://confluence.../pages/viewpage.action?pageId=...",
-            help="Save it under [partner_tier] in secrets.toml if you do not want to paste it each time.",
+        st.markdown("### Source file")
+        st.caption("Weekly default: upload the newest Word export. Excel and CSV remain supported.")
+        uploaded_file = st.file_uploader(
+            "Partner Information file",
+            type=["docx", "xlsx", "xlsm", "csv"],
+            key="partner_tier_source_file",
+            help="In Confluence choose Export to Word, then upload the exported .docx.",
+            label_visibility="collapsed",
         )
     with action_col:
         st.write("")
         st.write("")
         clear_clicked = st.button("Clear preview", use_container_width=True, key="partner_tier_clear")
 
+    with st.expander("Advanced · direct Confluence source", expanded=False):
+        st.caption("Use this only when Change Helper is running inside the corporate network. Streamlit Cloud cannot resolve the internal Confluence host.")
+        use_direct_confluence = st.checkbox("Use Confluence URL instead of uploaded file", key="partner_tier_use_confluence")
+        if use_direct_confluence:
+            source_mode = "Confluence URL"
+            page_url = st.text_input(
+                "Confluence page URL",
+                value=configured_url,
+                key="partner_tier_confluence_url",
+                placeholder="https://confluence.../display/...",
+            )
+
+    if uploaded_file is not None:
+        st.success(f"Source selected: {uploaded_file.name}")
+
     with st.expander("JQL used to find empty Partner tier tickets", expanded=False):
         jql = st.text_area("JQL", value=default_jql, height=260, key="partner_tier_jql", label_visibility="collapsed")
 
     c1, c2, c3 = st.columns([1.2, 1.2, 3])
     preview_clicked = c1.button("Preview sync", type="primary", use_container_width=True, key="partner_tier_preview")
-    c2.caption("No Jira fields are changed during preview.")
-    c3.caption("Unsafe rows stay blocked with a reason instead of being guessed.")
+    c2.caption("Preview never changes Jira.")
+    c3.caption("Missing, ambiguous, or malformed source rows are blocked instead of guessed.")
 
     if clear_clicked:
         _clear_partner_tier_state()
@@ -561,7 +697,10 @@ def render_partner_tier_maintenance():
         _clear_partner_tier_state()
         if not require_jira_settings():
             return
-        if not page_url.strip():
+        if source_mode == "Upload file" and uploaded_file is None:
+            st.error("Upload the Partner Information file first. For Confluence, use Export to Word and upload the .docx.")
+            return
+        if source_mode == "Confluence URL" and not page_url.strip():
             st.error("Confluence page URL is empty.")
             return
         if not jql.strip():
@@ -572,11 +711,14 @@ def render_partner_tier_maintenance():
         tier_field_name = str(PARTNER_TIER_CONFIG.get("partner_tier_field_name", "Partner tier") or "Partner tier")
 
         try:
-            with st.spinner("Reading Confluence and Jira, then building a safe preview..."):
-                rows, source_title = load_confluence_partner_rows(
-                    page_url,
-                    jira_auth=(auth_type, username, token),
-                )
+            with st.spinner("Reading the source and Jira, then building a safe preview..."):
+                if source_mode == "Upload file":
+                    rows, source_title = load_partner_rows_from_upload(uploaded_file)
+                else:
+                    rows, source_title = load_confluence_partner_rows(
+                        page_url,
+                        jira_auth=(auth_type, username, token),
+                    )
                 lookup = build_partner_lookup(rows)
 
                 field_ids = jira_get_field_ids_by_name(
@@ -615,7 +757,7 @@ def render_partner_tier_maintenance():
     actionable = st.session_state.get("partner_tier_actionable")
     blocked = st.session_state.get("partner_tier_blocked")
     if actionable is None and blocked is None:
-        st.info("Load a preview first. Nothing will be changed in Jira until the final confirmation step.")
+        st.info("Upload the current source file and load a preview. Nothing is changed in Jira until the final confirmation step.")
         return
 
     actionable = actionable or []
@@ -626,18 +768,18 @@ def render_partner_tier_maintenance():
     m1.metric("Jira tickets", total)
     m2.metric("Ready to update", len(actionable))
     m3.metric("Blocked", len(blocked))
-    m4.metric("Confluence rows", source_rows)
-    st.caption(f'Source: **{st.session_state.get("partner_tier_source_title", "Confluence")}**')
+    m4.metric("Source rows", source_rows)
+    st.caption(f'Source: **{st.session_state.get("partner_tier_source_title", "Uploaded file")}**')
 
     if actionable:
         st.subheader("Ready to update")
-        st.caption("Only these rows have one safe partner match and one unambiguous tier number.")
+        st.caption("Only rows with one safe partner match and one unambiguous tier number are eligible.")
         action_df = st.data_editor(
             pd.DataFrame(actionable),
             hide_index=True,
             use_container_width=True,
             key="partner_tier_editor",
-            disabled=["Key", "Open", "Summary", "Status", "Partner", "Confluence Partner", "Partner Category", "New tier", "Match"],
+            disabled=["Key", "Open", "Summary", "Status", "Partner", "Source Partner", "Partner Category", "New tier", "Match"],
             column_config={
                 "Select": st.column_config.CheckboxColumn("Select", default=True),
                 "Open": st.column_config.LinkColumn("Open", display_text="Open"),
@@ -714,3 +856,4 @@ def render_partner_tier_maintenance():
     if results:
         st.subheader("Update results")
         st.dataframe(pd.DataFrame(results), hide_index=True, use_container_width=True)
+

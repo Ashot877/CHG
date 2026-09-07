@@ -308,23 +308,26 @@ def render_follow_up_tasks():
 
 def page_weekly_tasks_helper():
     render_hero(
-        "Weekly Tasks Helper",
-        "Two weekly workspaces: SLA follow-up for people, and safe data maintenance for Jira fields.",
-        ["Follow-up", "Data Maintenance", "Preview before write"],
+        "Weekly Operations",
+        "One place for recurring Change Management work: SLA follow-up and controlled Jira data maintenance.",
+        ["SLA follow-up", "Partner Tier Sync", "Safe bulk actions"],
+        eyebrow="Digitain · Change Management · Weekly Operations",
     )
 
+    st.markdown('<div class="step-kicker">Choose workspace</div>', unsafe_allow_html=True)
     mode = st.radio(
         "Workspace",
         ["Follow-up", "Data Maintenance"],
         horizontal=True,
         key="weekly_workspace_mode",
+        label_visibility="collapsed",
         help="Follow-up keeps the existing SLA/comment workflow. Data Maintenance contains controlled field synchronization tasks.",
     )
 
     if mode == "Follow-up":
         st.markdown(
-            '<div class="maintenance-banner"><div class="maintenance-title">⏱️ Follow-up</div>'
-            '<div class="maintenance-text">Your existing breached / critical-zone workflow is unchanged: load the queue, choose a responsible person, review tickets, and add the internal comment.</div></div>',
+            '<div class="feature-panel"><div class="step-kicker">SLA workspace</div><div class="feature-title">Follow-up queues</div>'
+            '<div class="feature-text">Load breached or critical-zone tickets, open a responsible person’s queue, review the selection, and add the existing internal follow-up comment.</div></div>',
             unsafe_allow_html=True,
         )
         render_follow_up_tasks()
