@@ -10,6 +10,7 @@ from core.session import clear_handover_results
 NAV_ITEMS = {
     "Weekly Tasks": "Weekly Tasks Helper",
     "AM Handover": "AM Handover",
+    "Comment Review": "Comment Review",
     "ROX Domains": "ROX Domain Grouper",
     "Excel Splitter": "Excel Splitter",
 }
