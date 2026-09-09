@@ -134,10 +134,12 @@ def _request_comment_page(
     token,
     issue_key,
     start_at,
+    max_results=COMMENT_PAGE_SIZE,
 ):
     params = {
         "startAt": start_at,
-        "maxResults": COMMENT_PAGE_SIZE,
+        "maxResults": max_results,
+        "orderBy": "-created",
         "expand": "properties",
     }
 
@@ -168,15 +170,21 @@ def _request_comment_page(
     raise Exception(f"Could not load comments for {issue_key}.")
 
 
-def jira_get_all_comments(
+def jira_get_last_original_human_comment(
     jira_base_url,
     api_version,
     auth_type,
     username,
     token,
     issue_key,
+    profile_timezone,
 ):
-    comments = []
+    """Read Jira comments newest-first and stop at the first original human comment.
+
+    Jira's comment endpoint supports orderBy=created. Using orderBy=-created makes
+    pagination explicit and deterministic: page 1 contains the newest comments,
+    then page 2 contains the next older comments, and so on.
+    """
     start_at = 0
 
     while True:
@@ -188,19 +196,42 @@ def jira_get_all_comments(
             token,
             issue_key,
             start_at,
+            max_results=COMMENT_PAGE_SIZE,
         )
 
-        page_comments = (data or {}).get("comments", []) if isinstance(data, dict) else []
-        comments.extend(page_comments)
+        if not isinstance(data, dict):
+            return None
 
-        total = int((data or {}).get("total", len(comments))) if isinstance(data, dict) else len(comments)
-        if not page_comments or len(comments) >= total:
-            break
+        page_comments = data.get("comments", []) or []
+        if not page_comments:
+            return None
 
+        # Jira is asked for newest-first ordering. Sorting the returned page again
+        # by created is a harmless extra guard against odd plugin behavior.
+        parsed_comments = []
+        for comment in page_comments:
+            created = _to_review_clock(comment.get("created"), profile_timezone)
+            if created is not None:
+                parsed_comments.append((created, comment))
+
+        parsed_comments.sort(key=lambda item: item[0], reverse=True)
+
+        for created, comment in parsed_comments:
+            if not _is_original_human_comment(comment):
+                continue
+
+            return {
+                "created": created,
+                "comment": comment,
+                "body": _body_to_text(comment.get("body")),
+                "author": user_display(comment.get("author")) or "Unknown",
+            }
+
+        total = int(data.get("total", 0) or 0)
         start_at += len(page_comments)
 
-    return comments
-
+        if start_at >= total:
+            return None
 
 def _parse_jira_datetime(value):
     if not value:
@@ -248,28 +279,6 @@ def _to_review_clock(value, profile_timezone):
     return parsed.replace(tzinfo=None)
 
 
-def _latest_original_human_comment(comments, profile_timezone):
-    latest = None
-
-    for comment in comments:
-        if not _is_original_human_comment(comment):
-            continue
-
-        created = _to_review_clock(comment.get("created"), profile_timezone)
-        if created is None:
-            continue
-
-        if latest is None or created > latest["created"]:
-            latest = {
-                "created": created,
-                "comment": comment,
-                "body": _body_to_text(comment.get("body")),
-                "author": user_display(comment.get("author")) or "Unknown",
-            }
-
-    return latest
-
-
 def _matched_range_labels(comment_datetime, ranges):
     labels = []
     for index, (start_value, end_value) in enumerate(ranges, start=1):
@@ -289,16 +298,15 @@ def _analyze_issue(
     profile_timezone,
 ):
     key = issue.get("key", "")
-    comments = jira_get_all_comments(
+    latest = jira_get_last_original_human_comment(
         jira_base_url,
         api_version,
         auth_type,
         username,
         token,
         key,
+        profile_timezone,
     )
-
-    latest = _latest_original_human_comment(comments, profile_timezone)
     if not latest:
         return None
 
