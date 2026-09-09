@@ -11,6 +11,7 @@ from core.session import init_state
 from core.styles import apply_styles
 from core.ui import render_login, sidebar_nav
 from tools.am_handover import page_am_handover
+from tools.comment_review import page_comment_review
 from tools.excel_splitter import page_excel_splitter
 from tools.rox_domain_grouper import page_domain_grouper
 from tools.weekly_tasks import page_weekly_tasks_helper
@@ -38,6 +39,8 @@ def run_change_helper():
         page_weekly_tasks_helper()
     elif page == "AM Handover":
         page_am_handover()
+    elif page == "Comment Review":
+        page_comment_review()
     elif page == "ROX Domain Grouper":
         page_domain_grouper()
     elif page == "Excel Splitter":
