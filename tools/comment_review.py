@@ -32,8 +32,8 @@ BOT_IDENTITIES = {
 }
 
 PROPAGATED_MARKERS = (
-    "this internal message was originally posted by",
-    "this public message was originally posted by",
+    "this internal message was originally posted",
+    "this public message was originally posted",
 )
 
 PROPAGATED_METADATA_HINTS = (
