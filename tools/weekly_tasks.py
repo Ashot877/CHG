@@ -84,6 +84,40 @@ AND status NOT IN (
             },
         },
     },
+    "Questions": {
+        "group_field": "Assignee",
+        "subtasks": {
+            "Breached": {
+                "jql": '''issuetype = Questions
+AND status NOT IN (Answered, Closed, Done, draft, "Internal Review", "On Hold")
+AND slaFunction = isBreached("Question_Time to answer")''',
+                "comment": "Contacted {name} to inform that the ticket is breached",
+            },
+            "Critical Zone": {
+                "jql": '''issuetype = Questions
+AND status NOT IN (Answered, Closed, Done, draft, "Internal Review", "On Hold")
+AND slaFunction = isInCriticalZone("Question_Time to answer")''',
+                "comment": "Contacted {name} to inform that the ticket will be breached",
+            },
+        },
+    },
+    "Waiting for Information": {
+        "group_field": "Waiting information from",
+        "subtasks": {
+            "Breached": {
+                "jql": '''Project = "change management"
+AND status = "Waiting for information"
+AND slaFunction = isBreached("Change_Waiting for info")''',
+                "comment": "Contacted {name} to inform that the ticket is breached",
+            },
+            "Critical Zone": {
+                "jql": '''Project = "change management"
+AND status = "Waiting for information"
+AND slaFunction = isInCriticalZone("Change_Waiting for info")''',
+                "comment": "Contacted {name} to inform that the ticket will be breached",
+            },
+        },
+    },
 }
 
 def weekly_task_state_key(task_name, subtask_name):
@@ -94,7 +128,10 @@ def weekly_issue_row(issue, base_url, group_field_id=None):
     fields = issue.get("fields", {}) or {}
     key = issue.get("key", "")
     group_value = fields.get(group_field_id) if group_field_id else fields.get("assignee")
-    group_name = user_display(group_value) or "Unassigned"
+    if isinstance(group_value, list):
+        group_name = ", ".join(filter(None, (user_display(value) for value in group_value))) or "Unassigned"
+    else:
+        group_name = user_display(group_value) or "Unassigned"
     return {
         "Select": True,
         "Key": key,
@@ -134,14 +171,15 @@ def render_follow_up_tasks():
         try:
             with st.spinner("Loading Jira tickets..."):
                 group_field_id = None
-                if task_config["group_field"] == "Internal Reporter":
+                if task_config["group_field"] in ("Internal Reporter", "Waiting information from"):
                     field_map = get_field_map(
                         jira_base_url, api_version, auth_type, username, token, MANUAL_FIELD_IDS
                     )
-                    group_field_id = field_map.get("Internal Reporter")
+                    field_name = task_config["group_field"]
+                    group_field_id = field_map.get(field_name)
                     if not group_field_id:
                         raise Exception(
-                            "Internal Reporter field id was not found. Add it under "
+                            f"{field_name} field id was not found. Add it under "
                             "[manual_field_ids] in .streamlit/secrets.toml or verify the Jira field name."
                         )
 
