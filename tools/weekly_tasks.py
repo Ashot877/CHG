@@ -55,6 +55,19 @@ AND (
             },
         },
     },
+    "CHG Sub-Task Approval": {
+        "group_field": "Assignee",
+        "subtasks": {
+            "Breached": {
+                "jql": '''project = "Change Management"
+AND type = "CHG Sub-Task"
+AND slaFunction = isBreached("Change_Time to Approve")
+AND status = "Change Approval"
+ORDER BY assignee ASC''',
+                "comment": "Contacted {name} to inform them that the ticket has breached",
+            },
+        },
+    },
     "Config Change Resolution": {
         "group_field": "Assignee",
         "subtasks": {
@@ -214,9 +227,15 @@ def render_follow_up_tasks():
     metric2.metric("Responsible people", total_people)
 
     summary_rows = []
-    for person_name, person_rows in sorted(
-        groups.items(), key=lambda item: (-len(item[1]), item[0].lower())
-    ):
+    # Sort the CHG Sub-Task queue alphabetically by Assignee.
+    # Keep the existing ticket-count sorting for all other tasks.
+    if task_name == "CHG Sub-Task Approval":
+        sorted_groups = sorted(groups.items(), key=lambda item: item[0].lower())
+    else:
+        sorted_groups = sorted(
+            groups.items(), key=lambda item: (-len(item[1]), item[0].lower())
+        )
+    for person_name, person_rows in sorted_groups:
         keys = [row["Key"] for row in person_rows if row.get("Key")]
         key_jql = "key in (" + ", ".join(keys) + ")"
         filter_url = f"{clean_base_url(jira_base_url)}/issues/?jql={quote(key_jql)}"
