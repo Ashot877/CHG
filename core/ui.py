@@ -6,6 +6,7 @@ from core.config import APP_TITLE, APP_SUBTITLE, APP_USERS, AUTH_TYPE, JIRA_BASE
 from core.jira import jira_get_myself
 from core.session import clear_handover_results
 from core.themes import THEMES, get_active_theme, is_preview_allowed
+from tools.blaugrana_moments import can_view_moments
 
 
 NAV_ITEMS = {
@@ -166,9 +167,13 @@ def sidebar_nav():
         unsafe_allow_html=True,
     )
 
+    nav_items = NAV_ITEMS.copy()
+    if can_view_moments(current_user):
+        nav_items["Blaugrana Moments"] = "Blaugrana Moments"
+
     selected_label = st.sidebar.radio(
         "Navigation",
-        list(NAV_ITEMS.keys()),
+        list(nav_items.keys()),
         label_visibility="collapsed",
         key="main_navigation",
     )
@@ -190,6 +195,7 @@ def sidebar_nav():
         st.session_state.current_user = None
         st.session_state.jira_me = None
         st.session_state.pop("theme_preview", None)
+        st.session_state.pop("blaugrana_video_upload", None)
         clear_handover_results()
         st.rerun()
 
@@ -197,4 +203,4 @@ def sidebar_nav():
         '<div class="sidebar-footer">Change Helper<br><span>Safe updates with preview and confirmation.</span></div>',
         unsafe_allow_html=True,
     )
-    return NAV_ITEMS[selected_label]
+    return nav_items[selected_label]
