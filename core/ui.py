@@ -5,6 +5,7 @@ import streamlit as st
 from core.config import APP_TITLE, APP_SUBTITLE, APP_USERS, AUTH_TYPE, JIRA_BASE_URL, API_VERSION, VERIFY_JIRA_ON_LOGIN
 from core.jira import jira_get_myself
 from core.session import clear_handover_results
+from core.themes import THEMES, get_active_theme, is_preview_allowed
 
 
 NAV_ITEMS = {
@@ -87,8 +88,21 @@ def render_login():
 
 
 def render_hero(title, subtitle, pills=None, eyebrow="Change Operations"):
-    pills = pills or []
-    pill_html = "".join([f'<span class="pill">{escape(str(pill))}</span>' for pill in pills])
+    # One shared hero for every tool. Personalization is purely visual.
+    theme = get_active_theme()
+    is_personal = theme["id"] != "default"
+    pills = list(pills or [])
+    if is_personal:
+        pills.insert(0, theme["badge"])
+    pill_html = "".join(
+        f'<span class="pill{(" personal-edition-pill" if is_personal and idx == 0 else "")}">{escape(str(pill))}</span>'
+        for idx, pill in enumerate(pills)
+    )
+    stamp_html = (
+        '<div class="personal-hero-stamp" aria-hidden="true">'
+        f'<strong>{escape(theme["monogram"])}</strong><small>EDITION</small></div>'
+        if is_personal else ""
+    )
     st.markdown(
         f"""
         <div class="hero">
@@ -96,6 +110,7 @@ def render_hero(title, subtitle, pills=None, eyebrow="Change Operations"):
             <div class="hero-title">{escape(title)}</div>
             <div class="hero-subtitle">{escape(subtitle)}</div>
             <div class="pill-row">{pill_html}</div>
+            {stamp_html}
         </div>
         """,
         unsafe_allow_html=True,
@@ -104,6 +119,7 @@ def render_hero(title, subtitle, pills=None, eyebrow="Change Operations"):
 
 def sidebar_nav():
     current_user = st.session_state.current_user or {}
+    theme = get_active_theme()
     display_name = current_user.get("display_name") or current_user.get("jira_username") or "User"
     jira_name = display_name
     jira_connected = False
@@ -128,12 +144,23 @@ def sidebar_nav():
     )
 
     status_text = "Jira connected" if jira_connected else "Workspace ready"
+    welcome_html = ""
+    if theme["id"] != "default":
+        welcome_html = f"""
+        <div class="personal-welcome">
+            <div class="personal-welcome-kicker">✦ {escape(theme['badge'])}</div>
+            <div class="personal-welcome-title">Welcome back, {escape(str(display_name))}!</div>
+            <div class="personal-welcome-note">{escape(theme['note'])}</div>
+            <div class="personal-stripes" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+        </div>
+        """
     st.sidebar.markdown(
         f"""
         <div class="user-chip">
           <div class="user-name">{escape(str(jira_name))}</div>
           <div class="user-meta"><span class="status-dot"></span>{escape(status_text)}</div>
         </div>
+        {welcome_html}
         <div class="nav-label">Tools</div>
         """,
         unsafe_allow_html=True,
@@ -146,11 +173,23 @@ def sidebar_nav():
         key="main_navigation",
     )
 
+    # Available only for explicitly allowlisted testers, not regular employees.
+    # This never changes their Jira identity or credentials.
+    if is_preview_allowed(current_user):
+        st.sidebar.selectbox(
+            "Theme preview · visual only",
+            options=["account", *THEMES.keys()],
+            format_func=lambda key: "My assigned theme" if key == "account" else THEMES[key]["name"],
+            key="theme_preview",
+            help="Try another appearance without switching accounts. Disable in production Secrets.",
+        )
+
     st.sidebar.markdown('<div class="logout-separator"></div>', unsafe_allow_html=True)
     if st.sidebar.button("Log out", use_container_width=True, key="logout_button"):
         st.session_state.logged_in = False
         st.session_state.current_user = None
         st.session_state.jira_me = None
+        st.session_state.pop("theme_preview", None)
         clear_handover_results()
         st.rerun()
 
