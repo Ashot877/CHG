@@ -9,8 +9,6 @@ st.set_page_config(
 
 from core.session import init_state
 from core.styles import apply_styles
-from core.themes import get_active_theme
-from core.theme_styles import apply_personal_theme_styles
 from core.ui import render_login, sidebar_nav
 from tools.am_handover import page_am_handover
 from tools.comment_review import page_comment_review
@@ -26,9 +24,8 @@ def run_change_helper():
     pages/dashboard.py or pages/settings.py files in an old deployment from
     becoming visible in Streamlit's automatic navigation.
     """
-    init_state()
     apply_styles()
-    apply_personal_theme_styles(get_active_theme())
+    init_state()
 
     if not st.session_state.get("logged_in") or not st.session_state.get("current_user"):
         st.session_state.logged_in = False
