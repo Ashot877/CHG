@@ -12,7 +12,7 @@ from core.styles import apply_styles
 from core.themes import get_active_theme
 from core.theme_styles import apply_personal_theme_styles
 from core.ui import render_login, sidebar_nav
-from tools.blaugrana_moments import page_blaugrana_moments, can_view_moments
+from tools.personal_gallery import can_view_gallery, page_personal_gallery
 from tools.am_handover import page_am_handover
 from tools.comment_review import page_comment_review
 from tools.excel_splitter import page_excel_splitter
@@ -49,11 +49,11 @@ def run_change_helper():
         page_domain_grouper()
     elif page == "Excel Splitter":
         page_excel_splitter()
-    elif page == "Blaugrana Moments":
-        if can_view_moments(st.session_state.get("current_user")):
-            page_blaugrana_moments()
+    elif page == "Barça Memories":
+        if can_view_gallery(st.session_state.get("current_user")):
+            page_personal_gallery()
         else:
-            st.error("This page is not available for this account.")
+            st.error("This page is unavailable for this account.")
 
 
 # st.navigation disables the legacy pages/ directory for this app. position="hidden"
