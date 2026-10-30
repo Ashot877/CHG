@@ -6,8 +6,38 @@ from core.config import APP_TITLE, APP_SUBTITLE, APP_USERS, AUTH_TYPE, JIRA_BASE
 from core.jira import jira_get_myself
 from core.session import clear_handover_results
 from core.themes import THEMES, get_active_theme, is_preview_allowed
-from tools.personal_gallery import can_view_gallery
+from tools.personal_gallery import can_view_gallery, gallery_data_uri
 
+
+BARCA_VISUAL_CSS = r"""
+<style>
+.barca-hero-photo{pointer-events:none;position:absolute;inset:0 0 0 auto;width:38%;z-index:0;
+ opacity:.36;mask-image:linear-gradient(90deg,transparent,black 45%);
+ -webkit-mask-image:linear-gradient(90deg,transparent,black 45%)}
+.barca-hero-photo img{width:100%;height:100%;object-fit:cover}
+.hero .hero-title,.hero .hero-subtitle,.hero .pill-row,.hero .hero-eyebrow{z-index:2}
+.barca-hero-crest{position:absolute;right:29px;top:24px;z-index:4;width:80px;height:88px;
+ object-fit:contain;border-radius:0;border:0;transform:none;
+ filter:drop-shadow(0 10px 14px #0007)}
+.barca-hero-photo ~ .personal-hero-stamp{display:none!important}
+.barca-sidebar-crest{display:flex;align-items:center;gap:10px;margin:2px 4px 15px;
+ border:1px solid #e8be6966;border-radius:15px;padding:9px 10px;
+ background:linear-gradient(115deg,#a500443c,#2155a334)}
+.barca-sidebar-crest img{width:46px;height:50px;object-fit:contain;border-radius:0}
+.barca-sidebar-crest b{color:#f4d18b;font-size:10px;letter-spacing:.12em;display:block}
+.barca-sidebar-crest span{color:#e5e2f2;font-size:11px;display:block;margin-top:3px}
+@media(max-width:870px){.barca-hero-photo{width:55%;opacity:.18}.barca-hero-crest{width:52px;height:60px}}
+</style>
+"""
+
+# Each tool has a different Barça museum image. No new Jira logic.
+BARCA_TOOL_BACKGROUNDS = {
+    "weekly operations": "messi_b64",
+    "am handover": "trophies_b64",
+    "comment review": "shirts_b64",
+    "rox domain grouper": "barca_wall_b64",
+    "excel splitter": "kits_b64",
+}
 
 NAV_ITEMS = {
     "Weekly Tasks": "Weekly Tasks Helper",
@@ -104,9 +134,19 @@ def render_hero(title, subtitle, pills=None, eyebrow="Change Operations"):
         f'<strong>{escape(theme["monogram"])}</strong><small>EDITION</small></div>'
         if is_personal else ""
     )
+    hero_art = ""
+    if theme["id"] == "blaugrana":
+        st.markdown(BARCA_VISUAL_CSS, unsafe_allow_html=True)
+        art = gallery_data_uri(BARCA_TOOL_BACKGROUNDS.get(str(title).strip().lower(), ""))
+        if art:
+            hero_art = f'<div class="barca-hero-photo" aria-hidden="true"><img src="{art}" alt=""></div>'
+        crest = gallery_data_uri("crest_icon_b64")
+        if crest:
+            stamp_html = f'<img class="barca-hero-crest" src="{crest}" alt="FC Barcelona crest">'
     st.markdown(
         f"""
         <div class="hero">
+            {hero_art}
             <div class="hero-eyebrow">{escape(eyebrow)}</div>
             <div class="hero-title">{escape(title)}</div>
             <div class="hero-subtitle">{escape(subtitle)}</div>
@@ -155,6 +195,15 @@ def sidebar_nav():
             <div class="personal-stripes" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
         </div>
         """
+    if theme["id"] == "blaugrana":
+        crest = gallery_data_uri("crest_icon_b64")
+        if crest:
+            st.sidebar.markdown(BARCA_VISUAL_CSS, unsafe_allow_html=True)
+            st.sidebar.markdown(
+                f'<div class="barca-sidebar-crest"><img src="{crest}" alt="Barça crest">'
+                '<div><b>FC BARCELONA</b><span>Més que un club</span></div></div>',
+                unsafe_allow_html=True,
+            )
     st.sidebar.markdown(
         f"""
         <div class="user-chip">
