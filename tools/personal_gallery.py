@@ -20,7 +20,7 @@ BARCA_CREST_SVG_URL = "https://assets.footylogos.com/logos/fc-barcelona/fc-barce
 
 # Existing secrets section (first four photos) and an independent extension
 # section (the next four photos + cropped crest).
-PHOTO_SECTIONS = ("blaugrana_gallery", "blaugrana_max_gallery")
+PHOTO_SECTIONS = ("blaugrana_extra_gallery", "blaugrana_gallery", "blaugrana_max_gallery")
 
 
 def can_view_gallery(current_user):
@@ -73,11 +73,11 @@ PHOTOS = [
     dict(key="kits_b64", title="Wear the Colors", tag="THE IDENTITY",
          number="03", caption="Blue and garnet, generation after generation.", category="Legacy"),
     dict(key="barca_wall_b64", title="Barça, Barça!", tag="THE SPIRIT",
-         number="04", caption="More than a name. A feeling written on the walls.", category="Atmosphere"),
+         number="04", caption="One voice. A thousand languages. One club.", category="Atmosphere"),
     dict(key="golden_era_b64", title="The Golden Years", tag="THE LEGACY",
-         number="05", caption="Golden footballs and the number ten. A room full of memories.", category="Legends"),
+         number="05", caption="Five golden lights. One legendary number ten.", category="Legends"),
     dict(key="trophies_b64", title="Made of Dreams", tag="THE GLORY",
-         number="06", caption="The trophies shine. The stories behind them shine brighter.", category="Legends"),
+         number="06", caption="Some victories become history. Others become forever.", category="Legends"),
     dict(key="crest_b64", title="One Badge. A Thousand Stories.", tag="THE CREST",
          number="07", caption="Some symbols say everything without a single word.", category="Legacy"),
     dict(key="portrait_b64", title="A Moment of Your Own", tag="YOUR MEMORY",
